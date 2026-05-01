@@ -63,7 +63,7 @@ func New(model ai.Model, tools []Tool, initialPrompt string, sysPrompt string, c
 	return agent
 }
 
-func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, chan IterationInformation, <-chan error) {
+func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInformation, <-chan error) {
 	errCh := make(chan error, 1)
 	tokenCh := make(chan ai.Token, 16)
 	statusCh := make(chan IterationInformation, 16)
