@@ -63,6 +63,11 @@ func New(model ai.Model, tools []Tool, initialPrompt string, sysPrompt string, c
 	return agent
 }
 
+type iterationToolCall struct {
+	id       int
+	toolCall ai.ToolCall
+}
+
 func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInformation, <-chan error) {
 	errCh := make(chan error, 1)
 	tokenCh := make(chan ai.Token, 16)
@@ -86,7 +91,7 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 		var iteration Iteration
 		for i := range a.MaxLoopIterations {
 			iteration = Iteration{Count: i + 1}
-			toolCalls := 0
+			var toolCalls []iterationToolCall
 
 			iterCtx, cancel := context.WithCancel(ctx)
 
@@ -111,22 +116,11 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 
 			tokens := a.Model.GenerateStream(iterCtx, request)
 
-			wg := sync.WaitGroup{}
 			retrying := false
-			tcCh := make(chan struct {
-				ID       int
-				Response ToolResponse
-			}, 5)
 			for t := range tokens {
-
 				if t.Err != nil {
 					if retryCount < a.RetryCount {
-						retryCount++
 						retrying = true
-						cancel()
-						for t := range tokens {
-							tokenCh <- t
-						}
 						break
 					} else {
 						errCh <- fmt.Errorf("%w limit:%v error: %v", ErrMaxRetries, a.RetryCount, t.Err)
@@ -142,37 +136,15 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 					toolReq := t.ToolCall
 					partIdx := len(iteration.Parts) - 1
 
-					toolCalls++
-
-					wg.Go(func() {
-						res := CallTool(toolReq, a.Tools)
-						if a.PreProcessToolRes != nil {
-							if err := a.PreProcessToolRes.Process(*toolReq, res); err != nil {
-								res.Err = err
-							}
-						}
-
-						tcCh <- struct {
-							ID       int
-							Response ToolResponse
-						}{
-							ID:       partIdx,
-							Response: *res,
-						}
+					toolCalls = append(toolCalls, iterationToolCall{
+						id:       partIdx,
+						toolCall: *toolReq,
 					})
 				}
 			}
 
-			go func() {
-				wg.Wait()
-				close(tcCh)
-			}()
-
-			for tc := range tcCh {
-				iteration.Parts[tc.ID].ToolResp = &tc.Response
-			}
-
 			if retrying {
+				retryCount++
 				statusCh <- IterationInformation{
 					IterationCount: iteration.Count,
 					PartCount:      len(iteration.Parts),
@@ -182,15 +154,44 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 				continue
 			}
 
-			retryCount = 0
+			wg := sync.WaitGroup{}
+			for _, tc := range toolCalls {
+				wg.Add(1)
+				go func(tc iterationToolCall) {
+					defer wg.Done()
+
+					toolRes := CallTool(&tc.toolCall, a.Tools)
+					if a.PreProcessToolRes != nil {
+						if err := a.PreProcessToolRes.Process(tc.toolCall, toolRes); err != nil {
+							errCh <- fmt.Errorf("pre-processing tool response failed: %w", err)
+							return
+						}
+					}
+
+					iteration.Parts[tc.id].ToolResp = toolRes
+				}(tc)
+			}
+			wg.Wait()
+
 			a.Iterations = append(a.Iterations, iteration)
+			if retrying {
+				statusCh <- IterationInformation{
+					IterationCount: iteration.Count,
+					PartCount:      len(iteration.Parts),
+					RetryCount:     retryCount,
+				}
+				cancel()
+				continue
+			}
+			retryCount = 0
+
 			statusCh <- IterationInformation{
 				Iteration:      iteration,
 				IterationCount: iteration.Count,
 				PartCount:      len(iteration.Parts),
 				RetryCount:     retryCount,
 			}
-			if toolCalls == 0 && !retrying {
+			if len(toolCalls) == 0 && !retrying {
 				cancel()
 				return
 			}
