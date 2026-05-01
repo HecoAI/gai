@@ -229,6 +229,65 @@ func TestModelGenerateStreamToolCall(t *testing.T) {
 	}
 }
 
+func TestModelGenerateStreamToolCallDeltas(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("response writer is not a flusher")
+		}
+
+		for _, chunk := range []string{
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_","type":"function","function":{"name":"my_","arguments":"{\"param\""}}]}}]}` + "\n\n",
+			`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"abc","function":{"name":"tool","arguments":":\"value\"}"}}]}}]}` + "\n\n",
+			"data: [DONE]\n\n",
+		} {
+			if _, err := fmt.Fprint(w, chunk); err != nil {
+				t.Fatalf("write stream chunk: %v", err)
+			}
+			flusher.Flush()
+		}
+	}))
+	defer ts.Close()
+
+	p := New("test-key", nil)
+	p.baseURL = ts.URL
+
+	m, err := p.Model(MistralSmallLatest)
+	if err != nil {
+		t.Fatalf("Model error: %v", err)
+	}
+
+	stream := m.GenerateStream(context.Background(), ai.AIRequest{
+		Prompt: ai.Prompt{Prompt: "call a tool"},
+	})
+
+	var tokens []ai.Token
+	for tok := range stream {
+		if tok.Err != nil {
+			t.Fatalf("unexpected stream error: %v", tok.Err)
+		}
+		tokens = append(tokens, tok)
+	}
+
+	if len(tokens) != 1 {
+		t.Fatalf("expected 1 token, got %d", len(tokens))
+	}
+	tok := tokens[0]
+	if tok.Type != ai.TokenTypeToolCall {
+		t.Fatalf("expected TokenTypeToolCall, got %s", tok.Type)
+	}
+	if tok.ToolCall == nil {
+		t.Fatal("expected ToolCall to be populated, got nil")
+	}
+	if tok.ToolCall.Name != "my_tool" {
+		t.Fatalf("expected ToolCall.Name=my_tool, got %q", tok.ToolCall.Name)
+	}
+	if string(tok.ToolCall.Args) != `{"param":"value"}` {
+		t.Fatalf("expected accumulated ToolCall.Args, got %s", string(tok.ToolCall.Args))
+	}
+}
+
 func TestModelGenerateStreamDetectsTextEncodedToolCall(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

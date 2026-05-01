@@ -61,6 +61,7 @@ type chatCompletionStreamResponse struct {
 			Content   json.RawMessage `json:"content"`
 			ToolCalls json.RawMessage `json:"tool_calls"`
 		} `json:"delta"`
+		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
 }
 
@@ -70,14 +71,28 @@ type mistralStreamFunctionCall struct {
 }
 
 type mistralStreamToolCallEntry struct {
+	Index    int                       `json:"index"`
 	ID       string                    `json:"id"`
 	Type     string                    `json:"type"`
 	Function mistralStreamFunctionCall `json:"function"`
 }
 
-func mapMistralToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {
+type mistralToolCallAccumulator struct {
+	entries map[int]*mistralToolCallState
+	order   []int
+}
+
+type mistralToolCallState struct {
+	id        strings.Builder
+	callType  string
+	name      strings.Builder
+	arguments strings.Builder
+	emitted   bool
+}
+
+func (a *mistralToolCallAccumulator) add(raw json.RawMessage, final bool) ([]ai.ToolCall, error) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return nil, nil
+		return a.ready(final), nil
 	}
 
 	var calls []mistralStreamToolCallEntry
@@ -85,14 +100,62 @@ func mapMistralToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {
 		return nil, fmt.Errorf("decode tool_calls: %w", err)
 	}
 
-	result := make([]ai.ToolCall, 0, len(calls))
 	for _, c := range calls {
-		toolName := strings.TrimSpace(c.Function.Name)
-		args := json.RawMessage(c.Function.Arguments)
+		state := a.state(c.Index)
+		if strings.TrimSpace(c.ID) != "" {
+			state.id.WriteString(strings.TrimSpace(c.ID))
+		}
+		if strings.TrimSpace(c.Type) != "" {
+			state.callType = strings.TrimSpace(c.Type)
+		}
+		if strings.TrimSpace(c.Function.Name) != "" {
+			state.name.WriteString(strings.TrimSpace(c.Function.Name))
+		}
+		if c.Function.Arguments != "" {
+			state.arguments.WriteString(c.Function.Arguments)
+		}
+	}
+
+	return a.ready(final), nil
+}
+
+func (a *mistralToolCallAccumulator) state(index int) *mistralToolCallState {
+	if a.entries == nil {
+		a.entries = make(map[int]*mistralToolCallState)
+	}
+	state := a.entries[index]
+	if state == nil {
+		state = &mistralToolCallState{}
+		a.entries[index] = state
+		a.order = append(a.order, index)
+	}
+	return state
+}
+
+func (a *mistralToolCallAccumulator) ready(final bool) []ai.ToolCall {
+	var result []ai.ToolCall
+	for _, index := range a.order {
+		state := a.entries[index]
+		if state == nil || state.emitted {
+			continue
+		}
+		toolName := strings.TrimSpace(state.name.String())
+		if toolName == "" {
+			continue
+		}
+
+		args := json.RawMessage(state.arguments.String())
 		if len(args) == 0 {
+			if !final {
+				continue
+			}
 			args = json.RawMessage("{}")
 		}
-		callType := strings.TrimSpace(c.Type)
+		if !json.Valid(args) {
+			continue
+		}
+
+		callType := state.callType
 		if callType == "" {
 			callType = "function"
 		}
@@ -102,8 +165,9 @@ func mapMistralToolCalls(raw json.RawMessage) ([]ai.ToolCall, error) {
 			Name: toolName,
 			Args: args,
 		})
+		state.emitted = true
 	}
-	return result, nil
+	return result
 }
 
 func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.Token {
@@ -230,6 +294,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 
 		reader := bufio.NewReader(res.Body)
 		var eventData strings.Builder
+		var toolCallAccumulator mistralToolCallAccumulator
 
 		flushEvent := func() error {
 			event := strings.TrimSpace(eventData.String())
@@ -238,6 +303,13 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				return nil
 			}
 			if event == "[DONE]" {
+				for _, tc := range toolCallAccumulator.ready(true) {
+					tcCopy := tc
+					raw <- ai.Token{
+						Type:     ai.TokenTypeToolCall,
+						ToolCall: &tcCopy,
+					}
+				}
 				return io.EOF
 			}
 
@@ -257,9 +329,10 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 				raw <- ai.Token{Type: ai.TokenTypeText, Text: text, Data: []byte(text)}
 			}
 
+			finalToolCalls := chunk.Choices[0].FinishReason == "tool_calls"
 			toolCalls := strings.TrimSpace(string(chunk.Choices[0].Delta.ToolCalls))
-			if toolCalls != "" && toolCalls != "null" {
-				calls, mapErr := mapMistralToolCalls(chunk.Choices[0].Delta.ToolCalls)
+			if (toolCalls != "" && toolCalls != "null") || finalToolCalls {
+				calls, mapErr := toolCallAccumulator.add(chunk.Choices[0].Delta.ToolCalls, finalToolCalls)
 				if mapErr != nil {
 					if m.debug != nil {
 						fields := map[string]any{
@@ -292,7 +365,7 @@ func (m *Model) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan ai.
 					tcCopy := tc
 					raw <- ai.Token{
 						Type:     ai.TokenTypeToolCall,
-						Data:     append([]byte(nil), chunk.Choices[0].Delta.ToolCalls...),
+						Data:     append([]byte(nil), tc.Args...),
 						ToolCall: &tcCopy,
 					}
 				}

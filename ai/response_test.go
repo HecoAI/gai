@@ -144,6 +144,18 @@ func TestDetectToolCallsInStream(t *testing.T) {
 			},
 		},
 		{
+			name: "Detects adjacent tool calls across token boundary",
+			input: []ai.Token{
+				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-11","type":"function","name":"echo","arguments":{"x":1}}`)},
+				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-12","type":"function","name":"echo","arguments":{"y":2}} tail`)},
+			},
+			output: []expectedWrapToken{
+				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"x":1}`},
+				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"y":2}`},
+				{typ: ai.TokenTypeText, data: " tail", checkData: true},
+			},
+		},
+		{
 			name: "Detects multiple tool calls separated by blank lines",
 			input: []ai.Token{
 				{Type: ai.TokenTypeText, Data: []byte("intro\n\n")},

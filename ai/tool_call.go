@@ -127,6 +127,7 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Deb
 		escape := false
 
 		resetTracking := func() {
+			seenNonWS = false
 			newLines = 0
 			isJSONCandidate = false
 			objDepth = 0
