@@ -143,6 +143,24 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Deb
 			pending = nil
 		}
 
+		flushBeforeCandidate := func(current []byte, idx int) {
+			if len(pending) == 0 {
+				return
+			}
+
+			if idx > 0 {
+				pending[len(pending)-1].Data = current[:idx]
+			} else {
+				pending = pending[:len(pending)-1]
+			}
+			if len(bytes.TrimSpace(joinTokenData(pending))) == 0 {
+				resetTracking()
+				pending = nil
+				return
+			}
+			flushPending()
+		}
+
 		maybeToolCall := func(last string) bool {
 			if !isJSONCandidate {
 				return false
@@ -256,6 +274,10 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Deb
 							newLines++
 						}
 						if newLines >= 2 && b == '{' {
+							flushBeforeCandidate(remaining, idx)
+							pending = append(pending, Token{Type: TokenTypeText, Data: remaining[idx:]})
+							tokenStr.Reset()
+							tokenStr.WriteByte(b)
 							if debug != nil {
 								fields := map[string]any{}
 								if debug.IncludeSensitiveData() {
@@ -269,6 +291,7 @@ func DetectToolCallsInStream(ctx context.Context, in <-chan Token, debug gai.Deb
 							}
 							isJSONCandidate = true
 							objDepth = 1
+							seenNonWS = true
 							newLines = 0
 						}
 						continue

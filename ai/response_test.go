@@ -61,6 +61,29 @@ func TestDetectToolCallsInStream(t *testing.T) {
 			},
 		},
 		{
+			name: "Replays pending when non-JSON text arrives before decision",
+			input: []ai.Token{
+				{Type: ai.TokenTypeText, Data: []byte("Test\n\n{")},
+				{Type: ai.TokenTypeText, Data: []byte(`"id":"call-1","type":"function","name":"echo","arguments":`)},
+				{Type: ai.TokenTypeText, Data: []byte(`{"x":1}}\n\n trailing text `)},
+				{Type: ai.TokenTypeText, Data: []byte(`{"kind":1} tail`)},
+			},
+			output: []expectedWrapToken{
+				{typ: ai.TokenTypeText, data: "Test\n\n", checkData: true},
+				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"x":1}`},
+				{typ: ai.TokenTypeText, data: `\n\n trailing text {"kind":1} tail`, checkData: true},
+			},
+		},
+		{
+			name: "Validates that JSON must be a tool call, not just any JSON",
+			input: []ai.Token{
+				{Type: ai.TokenTypeText, Data: []byte(`{"kind":1} tail`)},
+			},
+			output: []expectedWrapToken{
+				{typ: ai.TokenTypeText, data: `{"kind":1} tail`},
+			},
+		},
+		{
 			name: "Replays when JSON is not a valid tool call",
 			input: []ai.Token{
 				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-1","type":"not-function","name":"echo"}`)},
@@ -121,6 +144,21 @@ func TestDetectToolCallsInStream(t *testing.T) {
 			},
 		},
 		{
+			name: "Detects multiple tool calls separated by blank lines",
+			input: []ai.Token{
+				{Type: ai.TokenTypeText, Data: []byte("intro\n\n")},
+				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-13","type":"function","name":"echo","arguments":{"x":1}}`)},
+				{Type: ai.TokenTypeText, Data: []byte("\n\n")},
+				{Type: ai.TokenTypeText, Data: []byte(`{"id":"call-14","type":"function","name":"echo","arguments":{"y":2}} tail`)},
+			},
+			output: []expectedWrapToken{
+				{typ: ai.TokenTypeText, data: "intro\n\n", checkData: true},
+				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"x":1}`},
+				{typ: ai.TokenTypeToolCall, toolType: "function", toolName: "echo", toolArgsJSON: `{"y":2}`},
+				{typ: ai.TokenTypeText, data: " tail", checkData: true},
+			},
+		},
+		{
 			name: "Detects tool call from production-like chunked JSON",
 			input: []ai.Token{
 				{Type: ai.TokenTypeText, Data: []byte("\n")},
@@ -174,12 +212,13 @@ func TestDetectToolCallsInStream(t *testing.T) {
 			}
 			close(in)
 
-			out := collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil))
-			if len(out) != len(tt.output) {
-				t.Fatalf("expected %d output tokens, got %d", len(tt.output), len(out))
+			out := normalizeTokens(collectTokens(ai.DetectToolCallsInStream(t.Context(), in, nil)))
+			expectedOut := normalizeExpectedTokens(tt.output)
+			if len(out) != len(expectedOut) {
+				t.Fatalf("expected %d output tokens, got %d: %#v", len(expectedOut), len(out), out)
 			}
 
-			for i, expected := range tt.output {
+			for i, expected := range expectedOut {
 				got := out[i]
 				if got.Type != expected.typ {
 					t.Fatalf("token %d unexpected type: got=%q want=%q", i, got.Type, expected.typ)
@@ -209,6 +248,31 @@ func TestDetectToolCallsInStream(t *testing.T) {
 			}
 		})
 	}
+}
+
+func normalizeTokens(tokens []ai.Token) []ai.Token {
+	var out []ai.Token
+	for _, tok := range tokens {
+		if tok.Type == ai.TokenTypeText && len(out) > 0 && out[len(out)-1].Type == ai.TokenTypeText {
+			out[len(out)-1].Data = append(out[len(out)-1].Data, tok.Data...)
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
+}
+
+func normalizeExpectedTokens(tokens []expectedWrapToken) []expectedWrapToken {
+	var out []expectedWrapToken
+	for _, tok := range tokens {
+		if tok.typ == ai.TokenTypeText && len(out) > 0 && out[len(out)-1].typ == ai.TokenTypeText {
+			out[len(out)-1].data += tok.data
+			out[len(out)-1].checkData = out[len(out)-1].checkData || tok.checkData || tok.data != ""
+			continue
+		}
+		out = append(out, tok)
+	}
+	return out
 }
 
 func collectTokens(in <-chan ai.Token) []ai.Token {
