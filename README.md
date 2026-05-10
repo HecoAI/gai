@@ -243,6 +243,8 @@ To manage conversation history and build prompts from it, use the `context` pack
 ```go
 store := mySessionStore // your implementation of SessionStore (e.g. in-memory, database, etc.)
 sessionManager := aicontext.NewSessionManager(store, 1) // the second argument is the session ID
+// or use a tokenizer-backed history budget:
+// sessionManager := aicontext.NewSessionManagerWithHistoryLimit(store, 1, model.Tokenizer(), 8000)
 
 l := loop.New(
     model, // the model you want to use
@@ -416,7 +418,8 @@ You provide your own store that can:
 ### 🧭 SessionManager (WIP)
 
 `SessionManager` builds prompt context from stored history.
-It loads the last 5 messages for the configured session, renders them, and appends the current loop messages.
+By default it loads 5 stored messages, renders them, and appends the current loop messages.
+`NewSessionManagerWithHistoryLimit(store, id, tokenCounter, maxTokens)` enables dynamic recency trimming so the final rendered context stays within a token budget.
 
 > [!NOTE]
 > `NewSessionManager(store, id)` expects an integer session ID. If you want to start a new session, create one first.
@@ -516,7 +519,7 @@ go test ./context/...
 ## 📝 Notes
 
 - The `context` package name intentionally mirrors the domain it manages, but it is easy to confuse with `context.Context` from the standard library. Use an alias in imports. The context package is likely to be renamed before official `1.0` release.
-- `SessionManager` currently uses a fixed history window of 5 messages.
+- `SessionManager` defaults to a fixed history window of 5 messages unless you use `NewSessionManagerWithHistoryLimit`.
 
 ## 🤝 Contributing
 
