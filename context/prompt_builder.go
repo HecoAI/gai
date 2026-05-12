@@ -24,6 +24,8 @@ type Part struct {
 	Required bool
 }
 
+type Prompt []Part
+
 func StaticPart(name, text string) Part {
 	return Part{
 		Name: name,
