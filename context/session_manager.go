@@ -5,20 +5,10 @@ import (
 	"strings"
 )
 
-const defaultHistoryLimit = 5
-
-type SessionManager struct {
+type HistorySource struct {
 	store SessionStore
 	id    int
 	limit int
-}
-
-func NewSessionManager(store SessionStore, id int) *SessionManager {
-	return &SessionManager{
-		store: store,
-		id:    id,
-		limit: defaultHistoryLimit,
-	}
 }
 
 func History(store SessionStore, id int, limit int) Source {
@@ -27,23 +17,6 @@ func History(store SessionStore, id int, limit int) Source {
 		id:    id,
 		limit: limit,
 	}
-}
-
-type HistorySource struct {
-	store SessionStore
-	id    int
-	limit int
-}
-
-func (s *SessionManager) BuildParts(ctx stdcontext.Context, conv Conversation) ([]Part, error) {
-	if s == nil {
-		return nil, ErrSessionStoreNotFound
-	}
-	return (&HistorySource{
-		store: s.store,
-		id:    s.id,
-		limit: s.limit,
-	}).BuildParts(ctx, conv)
 }
 
 func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([]Part, error) {
