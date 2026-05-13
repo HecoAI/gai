@@ -79,7 +79,7 @@ func (r XMLRenderer) Render(section Section, parts []Part) string {
 		builder.WriteString(`">`)
 		if part.Text != "" {
 			builder.WriteString("\n")
-			builder.WriteString(part.Text)
+			writeEscaped(&builder, part.Text)
 			builder.WriteString("\n")
 		}
 		builder.WriteString("</part>\n")

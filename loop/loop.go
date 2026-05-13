@@ -90,7 +90,7 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 
 			prompt, err := a.PromptBuilder.BuildPrompt(iterCtx, a)
 			if err != nil {
-				errCh <- fmt.Errorf("%w: %v", ErrBuildPrompt, err)
+				errCh <- fmt.Errorf("%w: %w", ErrBuildPrompt, err)
 				cancel()
 				return
 			}
