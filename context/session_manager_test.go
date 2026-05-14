@@ -43,8 +43,9 @@ func TestHistorySourceBuildsPartsWithinTokenBudget(t *testing.T) {
 		if !part.Required {
 			t.Fatalf("expected all produced parts to be required: %+v", parts)
 		}
-		if part.Tokens != tokenizer.CountTokens(part.Text) {
-			t.Fatalf("part %q has token count %d, want %d", part.Name, part.Tokens, tokenizer.CountTokens(part.Text))
+		wantTokens := mustCountTokens(t, tokenizer, part.Text)
+		if part.Tokens != wantTokens {
+			t.Fatalf("part %q has token count %d, want %d", part.Name, part.Tokens, wantTokens)
 		}
 	}
 	assertHistoryStoreQueries(t, store.calls, 7)
@@ -89,6 +90,22 @@ func TestHistorySourcePropagatesStoreErrors(t *testing.T) {
 	}
 }
 
+func TestHistorySourcePropagatesTokenizerErrors(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("count failed")
+	store := &fakeSessionStore{
+		messages: []aicontext.Message{
+			sessionMessage(1, aicontext.RoleUser, "stored one"),
+		},
+	}
+
+	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{err: wantErr}).BuildParts(stdcontext.Background(), fakeConversation{})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected tokenizer error %v, got %v", wantErr, err)
+	}
+}
+
 func TestHistorySourceRequiresStore(t *testing.T) {
 	t.Parallel()
 
@@ -98,14 +115,30 @@ func TestHistorySourceRequiresStore(t *testing.T) {
 	}
 }
 
-type whitespaceTokenizer struct{}
+func TestHistorySourceRequiresTokenizer(t *testing.T) {
+	t.Parallel()
+
+	store := &fakeSessionStore{}
+
+	_, err := aicontext.History(store, 7, 100, nil).BuildParts(stdcontext.Background(), fakeConversation{})
+	if !errors.Is(err, aicontext.ErrTokenizerNotFound) {
+		t.Fatalf("expected ErrTokenizerNotFound, got %v", err)
+	}
+}
+
+type whitespaceTokenizer struct {
+	err error
+}
 
 func (whitespaceTokenizer) Tokenize(text string) []string {
 	return strings.Fields(text)
 }
 
-func (t whitespaceTokenizer) CountTokens(text string) int {
-	return len(t.Tokenize(text))
+func (t whitespaceTokenizer) CountTokens(text string) (int, error) {
+	if t.err != nil {
+		return 0, t.err
+	}
+	return len(t.Tokenize(text)), nil
 }
 
 type fakeConversation struct {
@@ -209,4 +242,13 @@ func assertHistoryStoreQueries(t *testing.T, calls []getMessagesCall, sessionID 
 			t.Fatalf("expected non-negative history query offset, got %+v", call)
 		}
 	}
+}
+
+func mustCountTokens(t *testing.T, tokenizer whitespaceTokenizer, text string) int {
+	t.Helper()
+	tokens, err := tokenizer.CountTokens(text)
+	if err != nil {
+		t.Fatalf("CountTokens failed: %v", err)
+	}
+	return tokens
 }

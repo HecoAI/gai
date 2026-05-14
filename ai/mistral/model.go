@@ -69,12 +69,12 @@ type Tokenizer struct {
 	debug     gai.DebugSink
 }
 
-func (t *Tokenizer) CountTokens(text string) int {
+func (t *Tokenizer) CountTokens(text string) (int, error) {
 	count, err := t.countTokens(context.Background(), text)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return count
+	return count, nil
 }
 
 func (t *Tokenizer) Tokenize(text string) []string {

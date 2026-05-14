@@ -297,17 +297,17 @@ type Tokenizer struct {
 	local     *genaitokenizer.LocalTokenizer
 }
 
-func (t *Tokenizer) CountTokens(text string) int {
+func (t *Tokenizer) CountTokens(text string) (int, error) {
 	local, err := t.getLocal()
 	if err != nil {
-		return 0
+		return 0, err
 	}
 
 	result, err := local.CountTokens(genai.Text(text), nil)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return int(result.TotalTokens)
+	return int(result.TotalTokens), nil
 }
 
 func (t *Tokenizer) Tokenize(text string) []string {

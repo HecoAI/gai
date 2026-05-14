@@ -75,9 +75,9 @@ func (t MockTokenizer) Tokenize(text string) []string {
 	return nil
 }
 
-func (t MockTokenizer) CountTokens(text string) int {
+func (t MockTokenizer) CountTokens(text string) (int, error) {
 	if t.Err != nil {
-		return 0
+		return 0, t.Err
 	}
-	return t.Count
+	return t.Count, nil
 }

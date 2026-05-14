@@ -37,7 +37,10 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([
 	convParts := []Part{}
 	if conv != nil {
 		renderedConv := renderMessages(conv.Messages())
-		convTokens := s.tokenizer.CountTokens(renderedConv)
+		convTokens, err := s.tokenizer.CountTokens(renderedConv)
+		if err != nil {
+			return nil, err
+		}
 		tokens += convTokens
 		convParts = append(convParts, StaticPart("current-loop", renderedConv).RequiredPart().WithTokens(convTokens))
 	}
@@ -55,7 +58,10 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([
 		historyOffset += len(messages)
 
 		rendered := renderMessages(messages)
-		messageTokens := s.tokenizer.CountTokens(rendered)
+		messageTokens, err := s.tokenizer.CountTokens(rendered)
+		if err != nil {
+			return nil, err
+		}
 		if tokens+messageTokens > s.tokenLimit {
 			break
 		}
