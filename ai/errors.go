@@ -11,4 +11,5 @@ var (
 	ErrNilProvider           = errors.New("provider is nil")
 	ErrNilModelRepository    = errors.New("model repository is nil")
 	ErrInvalidToolCall       = errors.New("invalid tool call")
+	ErrTokenizerUnsupported  = errors.New("tokenizer operation unsupported")
 )

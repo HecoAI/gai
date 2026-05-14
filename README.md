@@ -101,7 +101,7 @@ response, err := model.Generate(context.Background(), ai.AIRequest{
 
 Currently, the library includes Gemini and Mistral implementations. Gemini uses the official `go-genai` library, and Mistral uses direct HTTP calls to the Mistral API.
 
-But you can implement your own provider by implementing the `Provider` and `Model` interfaces defined in the `ai` package.
+But you can implement your own provider by implementing the `Provider`, `Model`, and `Tokenizer` interfaces defined in the `ai` package.
 
 ### Example:
 
@@ -151,6 +151,10 @@ func (m *MyModel) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan a
 
 func (m *MyModel) Close() error {
     // clean up any resources if needed
+}
+
+func (m *MyModel) Tokenizer() ai.Tokenizer {
+    // return a tokenizer implementation for your model
 }
 ```
 
@@ -206,6 +210,7 @@ fmt.Println(builder.String()) // render the messages for display
 <details>
 
 <summary>🧩 Implement Your Own Tool</summary>
+
 To implement your own tool, create a struct that implements the `Tool` interface:
 
 ```go
@@ -256,7 +261,7 @@ prompt := aicontext.NewPromptBuilder().
         "base-system",
         "You are a helpful assistant that can call tools to get information.",
     ).RequiredPart()).
-    ContextSource("history", aicontext.History(store, sessionID, 5), true).
+    ContextSource("history", aicontext.History(store, sessionID, 10000, model.Tokenizer()), true).
     User(aicontext.StaticPart(
         "request",
         "What is the weather in New York?",
@@ -324,6 +329,7 @@ type Model interface {
     Generate(ctx context.Context, req AIRequest) (*AIResponse, error)
     GenerateStream(ctx context.Context, req AIRequest) <-chan Token
     Close() error
+    Tokenizer() Tokenizer
 }
 ```
 
@@ -436,7 +442,7 @@ You provide your own store that can:
 ```go
 prompt := aicontext.NewPromptBuilder().
     System(aicontext.StaticPart("base-system", "Follow the system policy.").RequiredPart()).
-    ContextSource("history", aicontext.History(store, sessionID, 5), true).
+    ContextSource("history", aicontext.History(store, sessionID, 1000, model.Tokenizer()), true).
     ContextSource("rag", ragSource, false).
     User(aicontext.StaticPart("request", "Summarize the project status.").RequiredPart())
 ```
@@ -457,7 +463,7 @@ The default renderer is XML-like and can be replaced with a custom renderer.
 
 ### 🧭 History Sources
 
-`History(store, sessionID, limit)` returns a prompt source that loads stored messages, renders them as a `history` part, and appends current loop messages as a `current-loop` part.
+`History(store, sessionID, tokenLimit, Tokenizer)` returns a prompt source that loads stored messages, renders them as a `history` part, and appends current loop messages as a `current-loop` part.
 
 ### 📄 Prompt Files
 
@@ -552,7 +558,7 @@ go test ./context/...
 ## 📝 Notes
 
 - The `context` package name intentionally mirrors the domain it manages, but it is easy to confuse with `context.Context` from the standard library. Use an alias in imports. The context package is likely to be renamed before official `1.0` release.
-- History limits are caller-provided via `History(store, id, limit)`; there is no default history window in the current API.
+- The `historyBuilder` is very unefficient for long conversations because it loads every message and counts the tokens separately. This will change in the future.
 
 ## 🤝 Contributing
 

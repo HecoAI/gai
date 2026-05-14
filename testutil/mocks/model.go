@@ -13,9 +13,10 @@ type MockModelResponse struct {
 }
 
 type MockModel struct {
-	ModelName string
-	Count     int
-	Responses []MockModelResponse
+	ModelName      string
+	Count          int
+	Responses      []MockModelResponse
+	TokenizerValue ai.Tokenizer
 }
 
 func (m *MockModel) Name() string {
@@ -56,4 +57,30 @@ func (m *MockModel) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan
 
 func (m *MockModel) Close() error {
 	return nil
+}
+
+func (m *MockModel) Tokenizer() ai.Tokenizer {
+	if m.TokenizerValue != nil {
+		return m.TokenizerValue
+	}
+	return MockTokenizer{}
+}
+
+type MockTokenizer struct {
+	Count int
+	Err   error
+}
+
+func (t MockTokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {
+	if t.Err != nil {
+		return nil, t.Err
+	}
+	return nil, nil
+}
+
+func (t MockTokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+	if t.Err != nil {
+		return 0, t.Err
+	}
+	return t.Count, nil
 }

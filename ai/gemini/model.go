@@ -10,6 +10,7 @@ import (
 	"github.com/lace-ai/gai"
 	"github.com/lace-ai/gai/ai"
 	"google.golang.org/genai"
+	genaitokenizer "google.golang.org/genai/tokenizer"
 )
 
 type Model struct {
@@ -24,6 +25,12 @@ var _ ai.Model = (*Model)(nil)
 
 func (m *Model) Name() string {
 	return m.name
+}
+
+func (m *Model) Tokenizer() ai.Tokenizer {
+	return &Tokenizer{
+		modelName: m.name,
+	}
 }
 
 func (m *Model) Close() error {
@@ -282,4 +289,59 @@ func (m *Model) getClient(ctx context.Context) (*genai.Client, error) {
 
 	m.api = client
 	return m.api, nil
+}
+
+type Tokenizer struct {
+	modelName string
+	mu        sync.Mutex
+	local     *genaitokenizer.LocalTokenizer
+}
+
+func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+	local, err := t.getLocal()
+	if err != nil {
+		return 0, err
+	}
+
+	result, err := local.CountTokens(genai.Text(text), nil)
+	if err != nil {
+		return 0, err
+	}
+	return int(result.TotalTokens), nil
+}
+
+func (t *Tokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {
+	local, err := t.getLocal()
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := local.ComputeTokens(genai.Text(text))
+	if err != nil {
+		return nil, err
+	}
+
+	var tokens []string
+	for _, info := range result.TokensInfo {
+		for _, token := range info.Tokens {
+			tokens = append(tokens, string(token))
+		}
+	}
+	return tokens, nil
+}
+
+func (t *Tokenizer) getLocal() (*genaitokenizer.LocalTokenizer, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if t.local != nil {
+		return t.local, nil
+	}
+
+	local, err := genaitokenizer.NewLocalTokenizer(t.modelName)
+	if err != nil {
+		return nil, err
+	}
+	t.local = local
+	return t.local, nil
 }

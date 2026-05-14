@@ -71,6 +71,10 @@ func (m *scriptedStreamModel) Close() error {
 	return nil
 }
 
+func (m *scriptedStreamModel) Tokenizer() ai.Tokenizer {
+	return mocks.MockTokenizer{}
+}
+
 func (m *scriptedStreamModel) Requests() []ai.AIRequest {
 	m.mu.Lock()
 	defer m.mu.Unlock()
