@@ -101,7 +101,7 @@ response, err := model.Generate(context.Background(), ai.AIRequest{
 
 Currently, the library includes Gemini and Mistral implementations. Gemini uses the official `go-genai` library, and Mistral uses direct HTTP calls to the Mistral API.
 
-But you can implement your own provider by implementing the `Provider` and `Model` interfaces defined in the `ai` package.
+But you can implement your own provider by implementing the `Provider` and `Model` and a `Tokenizer` interfaces defined in the `ai` package.
 
 ### Example:
 
@@ -151,6 +151,10 @@ func (m *MyModel) GenerateStream(ctx context.Context, req ai.AIRequest) <-chan a
 
 func (m *MyModel) Close() error {
     // clean up any resources if needed
+}
+
+func (m *MyModel) Tokenizer() ai.Tokenizer {
+    // return a tokenizer implementation for your model
 }
 ```
 
@@ -206,6 +210,7 @@ fmt.Println(builder.String()) // render the messages for display
 <details>
 
 <summary>🧩 Implement Your Own Tool</summary>
+
 To implement your own tool, create a struct that implements the `Tool` interface:
 
 ```go
@@ -256,7 +261,7 @@ prompt := aicontext.NewPromptBuilder().
         "base-system",
         "You are a helpful assistant that can call tools to get information.",
     ).RequiredPart()).
-    ContextSource("history", aicontext.History(store, sessionID, 5), true).
+    ContextSource("history", aicontext.History(store, sessionID, 10000, model.Tokenizer()), true).
     User(aicontext.StaticPart(
         "request",
         "What is the weather in New York?",
