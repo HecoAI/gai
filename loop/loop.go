@@ -80,6 +80,7 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 		defer close(statusCh)
 
 		retryCount := 0
+		completedToolCalls := map[string]struct{}{}
 
 		var iteration Iteration
 		for i := range a.MaxLoopIterations {
@@ -115,10 +116,15 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 					}
 				}
 
-				iteration.AppendToken(t)
-				tokenCh <- t
-
 				if t.Type == ai.TokenTypeToolCall && t.ToolCall != nil {
+					signature := toolCallSignature(*t.ToolCall)
+					if _, ok := completedToolCalls[signature]; ok {
+						continue
+					}
+
+					iteration.AppendToken(t)
+					tokenCh <- t
+
 					toolReq := t.ToolCall
 					partIdx := len(iteration.Parts) - 1
 
@@ -126,6 +132,9 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 						id:       partIdx,
 						toolCall: *toolReq,
 					})
+				} else {
+					iteration.AppendToken(t)
+					tokenCh <- t
 				}
 			}
 
@@ -158,6 +167,13 @@ func (a *Loop) Loop(ctx context.Context) (<-chan ai.Token, <-chan IterationInfor
 				}(tc)
 			}
 			wg.Wait()
+
+			for _, tc := range toolCalls {
+				part := iteration.Parts[tc.id]
+				if part.ToolResp != nil {
+					completedToolCalls[toolCallSignature(tc.toolCall)] = struct{}{}
+				}
+			}
 
 			a.Iterations = append(a.Iterations, iteration)
 			if retrying {

@@ -74,6 +74,7 @@ func (t *Tokenizer) Tokenize(ctx context.Context, text string) ([]string, error)
 }
 
 func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
+	const maxTokensForTokenCount = 1
 	payload := chatCompletionRequest{
 		Model: t.modelName,
 		Messages: []chatMessageRequest{
@@ -82,7 +83,7 @@ func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
 				Content: text,
 			},
 		},
-		MaxTokens: intPtr(0),
+		MaxTokens: intPtr(maxTokensForTokenCount),
 	}
 
 	body, err := json.Marshal(payload)
