@@ -442,7 +442,7 @@ You provide your own store that can:
 ```go
 prompt := aicontext.NewPromptBuilder().
     System(aicontext.StaticPart("base-system", "Follow the system policy.").RequiredPart()).
-    ContextSource("history", aicontext.History(store, sessionID, 5), true).
+    ContextSource("history", aicontext.History(store, sessionID, 1000, model.Tokenizer()), true).
     ContextSource("rag", ragSource, false).
     User(aicontext.StaticPart("request", "Summarize the project status.").RequiredPart())
 ```
@@ -463,7 +463,7 @@ The default renderer is XML-like and can be replaced with a custom renderer.
 
 ### 🧭 History Sources
 
-`History(store, sessionID, limit)` returns a prompt source that loads stored messages, renders them as a `history` part, and appends current loop messages as a `current-loop` part.
+`History(store, sessionID, tokenLimit, Tokenizer)` returns a prompt source that loads stored messages, renders them as a `history` part, and appends current loop messages as a `current-loop` part.
 
 ### 📄 Prompt Files
 
