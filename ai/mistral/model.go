@@ -69,8 +69,8 @@ type Tokenizer struct {
 	debug     gai.DebugSink
 }
 
-func (t *Tokenizer) Tokenize(ctx context.Context, text string) []string {
-	return nil
+func (t *Tokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {
+	return nil, nil
 }
 
 func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {

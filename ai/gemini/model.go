@@ -310,15 +310,15 @@ func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {
 	return int(result.TotalTokens), nil
 }
 
-func (t *Tokenizer) Tokenize(ctx context.Context, text string) []string {
+func (t *Tokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {
 	local, err := t.getLocal()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	result, err := local.ComputeTokens(genai.Text(text))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 
 	var tokens []string
@@ -327,7 +327,7 @@ func (t *Tokenizer) Tokenize(ctx context.Context, text string) []string {
 			tokens = append(tokens, string(token))
 		}
 	}
-	return tokens
+	return tokens, nil
 }
 
 func (t *Tokenizer) getLocal() (*genaitokenizer.LocalTokenizer, error) {

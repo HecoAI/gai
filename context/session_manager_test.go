@@ -130,15 +130,19 @@ type whitespaceTokenizer struct {
 	err error
 }
 
-func (whitespaceTokenizer) Tokenize(ctx stdcontext.Context, text string) []string {
-	return strings.Fields(text)
+func (t whitespaceTokenizer) Tokenize(ctx stdcontext.Context, text string) ([]string, error) {
+	if t.err != nil {
+		return nil, t.err
+	}
+	return strings.Fields(text), nil
 }
 
 func (t whitespaceTokenizer) CountTokens(ctx stdcontext.Context, text string) (int, error) {
-	if t.err != nil {
-		return 0, t.err
+	tokens, err := t.Tokenize(ctx, text)
+	if err != nil {
+		return 0, err
 	}
-	return len(t.Tokenize(ctx, text)), nil
+	return len(tokens), nil
 }
 
 type fakeConversation struct {

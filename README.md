@@ -558,6 +558,7 @@ go test ./context/...
 ## 📝 Notes
 
 - The `context` package name intentionally mirrors the domain it manages, but it is easy to confuse with `context.Context` from the standard library. Use an alias in imports. The context package is likely to be renamed before official `1.0` release.
+- The `historyBuilder` is very unefficient for long conversations because it loads every message and counts the tokens separately. This will change in the future.
 
 ## 🤝 Contributing
 
