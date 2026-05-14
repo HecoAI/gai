@@ -70,7 +70,7 @@ type Tokenizer struct {
 }
 
 func (t *Tokenizer) Tokenize(ctx context.Context, text string) ([]string, error) {
-	return nil, nil
+	return nil, ai.ErrTokenizerUnsupported
 }
 
 func (t *Tokenizer) CountTokens(ctx context.Context, text string) (int, error) {

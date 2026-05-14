@@ -3,6 +3,7 @@ package mistral
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -92,6 +93,23 @@ func TestModelGenerateNoChoices(t *testing.T) {
 	_, err = m.Generate(context.Background(), ai.AIRequest{Prompt: ai.Prompt{Prompt: "hello"}})
 	if err != ErrNoChoices {
 		t.Fatalf("expected ErrNoChoices, got %v", err)
+	}
+}
+
+func TestModelTokenizerTokenizeUnsupported(t *testing.T) {
+	p := New("test-key", nil)
+
+	m, err := p.Model(MistralSmallLatest)
+	if err != nil {
+		t.Fatalf("Model error: %v", err)
+	}
+
+	tokens, err := m.Tokenizer().Tokenize(context.Background(), "hello")
+	if !errors.Is(err, ai.ErrTokenizerUnsupported) {
+		t.Fatalf("expected ErrTokenizerUnsupported, got %v", err)
+	}
+	if tokens != nil {
+		t.Fatalf("expected no tokens for unsupported tokenizer, got %#v", tokens)
 	}
 }
 
