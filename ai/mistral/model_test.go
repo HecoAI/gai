@@ -160,8 +160,8 @@ func TestModelTokenizerCountTokens(t *testing.T) {
 	if gotReq.Messages[0].Content != "hello" {
 		t.Fatalf("unexpected content: %q", gotReq.Messages[0].Content)
 	}
-	if gotReq.MaxTokens == nil || *gotReq.MaxTokens != 0 {
-		t.Fatalf("expected max_tokens=0, got %+v", gotReq.MaxTokens)
+	if gotReq.MaxTokens == nil || *gotReq.MaxTokens != 1 {
+		t.Fatalf("expected max_tokens=1, got %+v", gotReq.MaxTokens)
 	}
 	if got != 9 {
 		t.Fatalf("expected 9 tokens, got %d", got)

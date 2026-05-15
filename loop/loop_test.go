@@ -121,7 +121,7 @@ func TestLoop(t *testing.T) {
 			name: "Multiple iterations with tool calls",
 			iterations: []mocks.MockModelResponse{
 				{Res: ai.AIResponse{Text: `{"id":"call-1","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
-				{Res: ai.AIResponse{Text: `{"id":"call-2","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
+				{Res: ai.AIResponse{Text: `{"id":"call-2","type":"function","name":"echo","arguments":{"text":"another test"}}`}, Err: nil},
 				{Res: ai.AIResponse{Text: "How are you?"}, Err: nil},
 			},
 			wantIterations: 3,
@@ -130,10 +130,10 @@ func TestLoop(t *testing.T) {
 		{
 			name: "Exceeding max iterations",
 			iterations: []mocks.MockModelResponse{
-				{Res: ai.AIResponse{Text: `{"id":"call-1","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
-				{Res: ai.AIResponse{Text: `{"id":"call-2","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
-				{Res: ai.AIResponse{Text: `{"id":"call-3","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
-				{Res: ai.AIResponse{Text: `{"id":"call-4","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
+				{Res: ai.AIResponse{Text: `{"id":"call-1","type":"function","name":"echo","arguments":{"text":"test 1"}}`}, Err: nil},
+				{Res: ai.AIResponse{Text: `{"id":"call-2","type":"function","name":"echo","arguments":{"text":"test 2"}}`}, Err: nil},
+				{Res: ai.AIResponse{Text: `{"id":"call-3","type":"function","name":"echo","arguments":{"text":"test 3"}}`}, Err: nil},
+				{Res: ai.AIResponse{Text: `{"id":"call-4","type":"function","name":"echo","arguments":{"text":"test 4"}}`}, Err: nil},
 			},
 			wantIterations: 2,
 			maxIterations:  2,
@@ -162,8 +162,8 @@ func TestLoop(t *testing.T) {
 			name: "Tool call with error",
 			iterations: []mocks.MockModelResponse{
 				{Res: ai.AIResponse{Text: `{"id":"call-1","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
-				{Res: ai.AIResponse{Text: `{"id":"call-2","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: errors.New("tool execution failed")},
-				{Res: ai.AIResponse{Text: `{"id":"call-3","type":"function","name":"echo","arguments":{"text":"test"}}`}, Err: nil},
+				{Res: ai.AIResponse{Text: `{"id":"call-2","type":"function","name":"echo","arguments":{"text":"second test"}}`}, Err: errors.New("tool execution failed")},
+				{Res: ai.AIResponse{Text: `{"id":"call-3","type":"function","name":"echo","arguments":{"text":"third test"}}`}, Err: nil},
 				{Res: ai.AIResponse{Text: "How are you?"}, Err: nil},
 			},
 			wantIterations: 3,
@@ -321,6 +321,60 @@ func TestLoopHandlesManyToolCallsInOneIteration(t *testing.T) {
 				t.Fatalf("expected %d tool errors, got %d", tt.wantToolErrors, toolErrs)
 			}
 		})
+	}
+}
+
+func TestLoopSuppressesRepeatedCompletedToolCall(t *testing.T) {
+	t.Parallel()
+
+	toolCall := ai.Token{
+		Type: ai.TokenTypeToolCall,
+		ToolCall: &ai.ToolCall{
+			ID:   "call-1",
+			Type: "function",
+			Name: "echo",
+			Args: json.RawMessage(`{"text":"repeat"}`),
+		},
+	}
+	formattedToolCall := ai.Token{
+		Type: ai.TokenTypeToolCall,
+		ToolCall: &ai.ToolCall{
+			ID:   "call-2",
+			Type: "function",
+			Name: "echo",
+			Args: json.RawMessage("{\n  \"text\": \"repeat\"\n}"),
+		},
+	}
+
+	model := &scriptedStreamModel{
+		sequences: [][]ai.Token{
+			{toolCall},
+			{formattedToolCall},
+		},
+	}
+
+	l := loop.New(model, []loop.Tool{loop.NewEchoTool()}, testPromptBuilder(), nil)
+	l.MaxLoopIterations = 3
+
+	tokenCh, _, errCh := l.Loop(context.Background())
+	var tokens []ai.Token
+	for token := range tokenCh {
+		tokens = append(tokens, token)
+	}
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("unexpected loop error: %v", err)
+		}
+	}
+
+	if len(tokens) != 1 {
+		t.Fatalf("expected duplicate tool call to be suppressed, got %d tokens", len(tokens))
+	}
+	if len(l.Iterations) != 2 {
+		t.Fatalf("expected two iterations including suppressed duplicate, got %d", len(l.Iterations))
+	}
+	if got := len(l.Iterations[1].Parts); got != 0 {
+		t.Fatalf("expected suppressed duplicate iteration to have no parts, got %d", got)
 	}
 }
 
