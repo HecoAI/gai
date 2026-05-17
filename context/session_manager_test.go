@@ -209,46 +209,6 @@ func (v testPromptView) Entry(id string) (aicontext.EntryView, bool) {
 	return aicontext.EntryView{}, false
 }
 
-type getMessagesCall struct {
-	sessionID int
-	limit     int
-	offset    int
-}
-
-type fakeSessionStore struct {
-	messages []aicontext.Message
-	err      error
-	calls    []getMessagesCall
-}
-
-func (s *fakeSessionStore) GetSession(sessionID int) error {
-	return nil
-}
-
-func (s *fakeSessionStore) GetMessages(sessionID int, limit int, offset int) ([]aicontext.Message, error) {
-	s.calls = append(s.calls, getMessagesCall{sessionID: sessionID, limit: limit, offset: offset})
-	if s.err != nil {
-		return nil, s.err
-	}
-	if offset >= len(s.messages) {
-		return nil, nil
-	}
-	end := min(offset+limit, len(s.messages))
-	return s.messages[offset:end], nil
-}
-
-func (s *fakeSessionStore) CreateSession() (int, error) {
-	return 0, nil
-}
-
-func (s *fakeSessionStore) AddMessages(sessionID int, messages []aicontext.Message) ([]aicontext.Message, error) {
-	return messages, nil
-}
-
-func (s *fakeSessionStore) AddMessage(sessionID int, message aicontext.Message) (aicontext.Message, error) {
-	return message, nil
-}
-
 func sessionMessage(id int, role aicontext.Role, text string) aicontext.Message {
 	return aicontext.Message{
 		ID:        id,
