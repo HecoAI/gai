@@ -8,13 +8,14 @@ import (
 	"time"
 
 	aicontext "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/testutil/mocks"
 )
 
 func TestHistorySourceBuildsPartsWithinTokenBudget(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeSessionStore{
-		messages: []aicontext.Message{
+	store := &mocks.MockSessionStore{
+		Messages: []aicontext.Message{
 			sessionMessage(1, aicontext.RoleUser, "stored one"),
 			sessionMessage(2, aicontext.RoleAssistant, "stored two"),
 			sessionMessage(3, aicontext.RoleUser, "stored message that does not fit"),
@@ -48,14 +49,14 @@ func TestHistorySourceBuildsPartsWithinTokenBudget(t *testing.T) {
 			t.Fatalf("part %q has token count %d, want %d", part.ID, part.Tokens, wantTokens)
 		}
 	}
-	assertHistoryStoreQueries(t, store.calls, 7)
+	assertHistoryStoreQueries(t, store.GetMessagesCalls, 7)
 }
 
 func TestHistorySourceDoesNotLoadStoredMessagesWhenCurrentLoopUsesBudget(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeSessionStore{
-		messages: []aicontext.Message{
+	store := &mocks.MockSessionStore{
+		Messages: []aicontext.Message{
 			sessionMessage(1, aicontext.RoleUser, "stored one"),
 		},
 	}
@@ -73,16 +74,16 @@ func TestHistorySourceDoesNotLoadStoredMessagesWhenCurrentLoopUsesBudget(t *test
 	rendered := joinPartText(parts)
 	assertHistoryContainsAll(t, rendered, "current message already fills budget")
 	assertHistoryContainsNone(t, rendered, "stored one")
-	if len(store.calls) != 0 {
-		t.Fatalf("expected no store calls when current loop reaches the budget, got %+v", store.calls)
+	if len(store.GetMessagesCalls) != 0 {
+		t.Fatalf("expected no store calls when current loop reaches the budget, got %+v", store.GetMessagesCalls)
 	}
 }
 
 func TestHistorySourceSkipsEmptyCurrentLoop(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeSessionStore{
-		messages: []aicontext.Message{
+	store := &mocks.MockSessionStore{
+		Messages: []aicontext.Message{
 			sessionMessage(1, aicontext.RoleUser, "stored one"),
 		},
 	}
@@ -104,7 +105,7 @@ func TestHistorySourcePropagatesStoreErrors(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("read failed")
-	store := &fakeSessionStore{err: wantErr}
+	store := &mocks.MockSessionStore{Err: wantErr}
 
 	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
 	if !errors.Is(err, wantErr) {
@@ -116,8 +117,8 @@ func TestHistorySourcePropagatesTokenizerErrors(t *testing.T) {
 	t.Parallel()
 
 	wantErr := errors.New("count failed")
-	store := &fakeSessionStore{
-		messages: []aicontext.Message{
+	store := &mocks.MockSessionStore{
+		Messages: []aicontext.Message{
 			sessionMessage(1, aicontext.RoleUser, "stored one"),
 		},
 	}
@@ -140,7 +141,7 @@ func TestHistorySourceRequiresStore(t *testing.T) {
 func TestHistorySourceRequiresTokenizer(t *testing.T) {
 	t.Parallel()
 
-	store := &fakeSessionStore{}
+	store := &mocks.MockSessionStore{}
 
 	_, err := aicontext.History(store, 7, 100, nil).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
 	if !errors.Is(err, aicontext.ErrTokenizerNotFound) {
@@ -285,19 +286,19 @@ func assertHistoryContainsNone(t *testing.T, text string, values ...string) {
 	}
 }
 
-func assertHistoryStoreQueries(t *testing.T, calls []getMessagesCall, sessionID int) {
+func assertHistoryStoreQueries(t *testing.T, calls []mocks.GetMessagesCall, sessionID int) {
 	t.Helper()
 	if len(calls) == 0 {
 		t.Fatal("expected history source to query the session store")
 	}
 	for _, call := range calls {
-		if call.sessionID != sessionID {
+		if call.SessionID != sessionID {
 			t.Fatalf("unexpected session id in store call: got %+v want session %d", call, sessionID)
 		}
-		if call.limit < 1 {
+		if call.Limit < 1 {
 			t.Fatalf("expected positive history query limit, got %+v", call)
 		}
-		if call.offset < 0 {
+		if call.Offset < 0 {
 			t.Fatalf("expected non-negative history query offset, got %+v", call)
 		}
 	}

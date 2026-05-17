@@ -1,12 +1,14 @@
 package context
 
+import "context"
+
 type SessionStore interface {
-	GetSession(sessionID int) error
+	GetSession(ctx context.Context, sessionID int) error
 	// GetMessages returns messages in a session, ordered by created_at asc
-	GetMessages(sessionID int, limit int, offset int) ([]Message, error)
-	CreateSession() (int, error)
-	AddMessages(sessionID int, messages []Message) ([]Message, error)
-	AddMessage(sessionID int, message Message) (Message, error)
+	GetMessages(ctx context.Context, sessionID int, limit int, offset int) ([]Message, error)
+	CreateSession(ctx context.Context) (int, error)
+	AddMessages(ctx context.Context, sessionID int, messages []Message) ([]Message, error)
+	AddMessage(ctx context.Context, sessionID int, message Message) (Message, error)
 }
 
 type Document struct {
