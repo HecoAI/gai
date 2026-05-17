@@ -46,3 +46,9 @@ func RenderMessages(messages []Message, builder *strings.Builder) {
 		builder.WriteString(">")
 	}
 }
+
+func renderMessages(messages []Message) string {
+	var builder strings.Builder
+	RenderMessages(messages, &builder)
+	return builder.String()
+}
