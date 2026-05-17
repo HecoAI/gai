@@ -86,8 +86,8 @@ func (m *scriptedStreamModel) Requests() []ai.AIRequest {
 
 func testPromptBuilder() aicontext.PromptBuilder {
 	return aicontext.NewPromptBuilder().
-		System(aicontext.StaticPart("system", "System prompt").RequiredPart()).
-		User(aicontext.StaticPart("request", "Initial prompt").RequiredPart())
+		System("system", "System prompt", aicontext.Required()).
+		User("request", "Initial prompt", aicontext.Required())
 }
 
 func TestLoop(t *testing.T) {
@@ -383,12 +383,12 @@ func TestLoopBuildsStructuredPromptEveryIteration(t *testing.T) {
 
 	var buildCount atomic.Int32
 	promptBuilder := aicontext.NewPromptBuilder().
-		System(aicontext.StaticPart("system", "System prompt").RequiredPart()).
-		ContextSource("dynamic-context", aicontext.SourceFunc(func(ctx context.Context, conv aicontext.Conversation) ([]aicontext.Part, error) {
+		System("system", "System prompt", aicontext.Required()).
+		Source(aicontext.SectionContext, "dynamic-context", aicontext.SourceFunc(func(ctx context.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
 			count := buildCount.Add(1)
-			return []aicontext.Part{aicontext.StaticPart("iteration", fmt.Sprintf("build-%d", count))}, nil
-		}), true).
-		User(aicontext.StaticPart("request", "Initial prompt").RequiredPart())
+			return []aicontext.Part{aicontext.NewPart("iteration", fmt.Sprintf("build-%d", count))}, nil
+		}), aicontext.Required()).
+		User("request", "Initial prompt", aicontext.Required())
 
 	model := &scriptedStreamModel{
 		sequences: [][]ai.Token{

@@ -175,14 +175,16 @@ To build an agent with tools, use the `loop` package:
 
 ```go
 prompt := aicontext.NewPromptBuilder().
-    System(aicontext.StaticPart(
+    System(
         "base-system",
         "You are a helpful assistant that can call tools to get information.",
-    ).RequiredPart()).
-    User(aicontext.StaticPart(
+        aicontext.Required(),
+    ).
+    User(
         "request",
         "What is the weather in New York?",
-    ).RequiredPart())
+        aicontext.Required(),
+    )
 
 l := loop.New(
     model, // the model you want to use
@@ -257,15 +259,17 @@ To manage conversation history and build prompts from it, use the `context` pack
 store := mySessionStore // your implementation of SessionStore (e.g. in-memory, database, etc.)
 sessionID := 1
 prompt := aicontext.NewPromptBuilder().
-    System(aicontext.StaticPart(
+    System(
         "base-system",
         "You are a helpful assistant that can call tools to get information.",
-    ).RequiredPart()).
-    ContextSource("history", aicontext.History(store, sessionID, 10000, model.Tokenizer()), true).
-    User(aicontext.StaticPart(
+        aicontext.Required(),
+    ).
+    Source(aicontext.SectionContext, "history", aicontext.History(store, sessionID, 10000, model.Tokenizer()), aicontext.Required()).
+    User(
         "request",
         "What is the weather in New York?",
-    ).RequiredPart())
+        aicontext.Required(),
+    )
 
 l := loop.New(
     model, // the model you want to use
@@ -441,25 +445,25 @@ You provide your own store that can:
 
 ```go
 prompt := aicontext.NewPromptBuilder().
-    System(aicontext.StaticPart("base-system", "Follow the system policy.").RequiredPart()).
-    ContextSource("history", aicontext.History(store, sessionID, 1000, model.Tokenizer()), true).
-    ContextSource("rag", ragSource, false).
-    User(aicontext.StaticPart("request", "Summarize the project status.").RequiredPart())
+    System("base-system", "Follow the system policy.", aicontext.Required()).
+    Source(aicontext.SectionContext, "history", aicontext.History(store, sessionID, 1000, model.Tokenizer()), aicontext.Required()).
+    Source(aicontext.SectionContext, "rag", ragSource, aicontext.Optional()).
+    User("request", "Summarize the project status.", aicontext.Required())
 ```
 
-Parts are rendered in fixed section order (`system`, `context`, `user`) and append order inside each section. Each part has a `Tokens` field for future token accounting, but the builder does not count, trim, or enforce token budgets yet.
+Entries use stable IDs and are rendered in fixed section order (`system`, `context`, `user`) and append order inside each section. Each part has a `Tokens` field for future token accounting, but the builder does not count, trim, or enforce token budgets yet.
 
 Dynamic sources implement:
 
 ```go
 type Source interface {
-    BuildParts(ctx context.Context, conv Conversation) ([]Part, error)
+    BuildParts(ctx context.Context, view PromptView) ([]Part, error)
 }
 ```
 
-Required source failures stop prompt building. Optional source failures are skipped.
+`PromptView` exposes the current conversation and a read-only view of the whole configured prompt plan, so sources can inspect planned entries by ID or section before emitting parts. Required source failures stop prompt building. Optional source failures are skipped.
 
-The default renderer is XML-like and can be replaced with a custom renderer.
+The default renderer is XML-like and can be replaced with a custom renderer. `LastTrace()` returns the most recent build trace, and `Debug(gai.DebugSink)` emits prompt-build events. Rendered part text is only included in debug events when the sink allows sensitive data.
 
 ### 🧭 History Sources
 

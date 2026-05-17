@@ -14,10 +14,7 @@ func (b *Builder) SystemPrompt(path string) (*Builder, error) {
 		return b, err
 	}
 
-	return b.System(StaticPart(
-		"base",
-		sysPrompt,
-	).RequiredPart()), nil
+	return b.System("base", sysPrompt, Required()), nil
 }
 
 func (b *Builder) ToolSysPrompt(path string) (*Builder, error) {
@@ -26,17 +23,11 @@ func (b *Builder) ToolSysPrompt(path string) (*Builder, error) {
 		return b, err
 	}
 
-	return b.System(StaticPart(
-		"tool",
-		sysPrompt,
-	).RequiredPart()), nil
+	return b.System("tool", sysPrompt, Required()), nil
 }
 
 func (b *Builder) UserPrompt(text string) *Builder {
-	return b.User(StaticPart(
-		"request",
-		text,
-	).RequiredPart())
+	return b.User("request", text, Required())
 }
 
 func loadPromptFromFile(path string) (string, error) {

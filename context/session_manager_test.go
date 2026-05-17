@@ -28,7 +28,7 @@ func TestHistorySourceBuildsPartsWithinTokenBudget(t *testing.T) {
 		},
 	}
 
-	parts, err := aicontext.History(store, 7, 17, tokenizer).BuildParts(stdcontext.Background(), conv)
+	parts, err := aicontext.History(store, 7, 17, tokenizer).BuildParts(stdcontext.Background(), testPromptView{conv: conv})
 	if err != nil {
 		t.Fatalf("BuildParts failed: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestHistorySourceBuildsPartsWithinTokenBudget(t *testing.T) {
 		}
 		wantTokens := mustCountTokens(t, tokenizer, part.Text)
 		if part.Tokens != wantTokens {
-			t.Fatalf("part %q has token count %d, want %d", part.Name, part.Tokens, wantTokens)
+			t.Fatalf("part %q has token count %d, want %d", part.ID, part.Tokens, wantTokens)
 		}
 	}
 	assertHistoryStoreQueries(t, store.GetMessagesCalls, 7)
@@ -66,7 +66,7 @@ func TestHistorySourceDoesNotLoadStoredMessagesWhenCurrentLoopUsesBudget(t *test
 		},
 	}
 
-	parts, err := aicontext.History(store, 7, 6, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), conv)
+	parts, err := aicontext.History(store, 7, 6, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: conv})
 	if err != nil {
 		t.Fatalf("BuildParts failed: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestHistorySourceSkipsEmptyCurrentLoop(t *testing.T) {
 		},
 	}
 
-	parts, err := aicontext.History(store, 7, 100, rejectingEmptyTokenizer{}).BuildParts(stdcontext.Background(), fakeConversation{})
+	parts, err := aicontext.History(store, 7, 100, rejectingEmptyTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
 	if err != nil {
 		t.Fatalf("BuildParts failed: %v", err)
 	}
@@ -96,8 +96,8 @@ func TestHistorySourceSkipsEmptyCurrentLoop(t *testing.T) {
 	if len(parts) != 1 {
 		t.Fatalf("expected only stored history, got %d parts: %+v", len(parts), parts)
 	}
-	if parts[0].Name != "history-0" {
-		t.Fatalf("expected stored history part, got %q", parts[0].Name)
+	if parts[0].ID != "history-0" {
+		t.Fatalf("expected stored history part, got %q", parts[0].ID)
 	}
 }
 
@@ -107,7 +107,7 @@ func TestHistorySourcePropagatesStoreErrors(t *testing.T) {
 	wantErr := errors.New("read failed")
 	store := &mocks.MockSessionStore{Err: wantErr}
 
-	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), fakeConversation{})
+	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected store error %v, got %v", wantErr, err)
 	}
@@ -123,7 +123,7 @@ func TestHistorySourcePropagatesTokenizerErrors(t *testing.T) {
 		},
 	}
 
-	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{err: wantErr}).BuildParts(stdcontext.Background(), fakeConversation{})
+	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{err: wantErr}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected tokenizer error %v, got %v", wantErr, err)
 	}
@@ -132,7 +132,7 @@ func TestHistorySourcePropagatesTokenizerErrors(t *testing.T) {
 func TestHistorySourceRequiresStore(t *testing.T) {
 	t.Parallel()
 
-	_, err := aicontext.History(nil, 7, 100, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), fakeConversation{})
+	_, err := aicontext.History(nil, 7, 100, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
 	if !errors.Is(err, aicontext.ErrSessionStoreNotFound) {
 		t.Fatalf("expected ErrSessionStoreNotFound, got %v", err)
 	}
@@ -143,7 +143,7 @@ func TestHistorySourceRequiresTokenizer(t *testing.T) {
 
 	store := &mocks.MockSessionStore{}
 
-	_, err := aicontext.History(store, 7, 100, nil).BuildParts(stdcontext.Background(), fakeConversation{})
+	_, err := aicontext.History(store, 7, 100, nil).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
 	if !errors.Is(err, aicontext.ErrTokenizerNotFound) {
 		t.Fatalf("expected ErrTokenizerNotFound, got %v", err)
 	}
@@ -187,6 +187,26 @@ type fakeConversation struct {
 
 func (c fakeConversation) Messages() []aicontext.Message {
 	return c.messages
+}
+
+type testPromptView struct {
+	conv aicontext.Conversation
+}
+
+func (v testPromptView) Conversation() aicontext.Conversation {
+	return v.conv
+}
+
+func (v testPromptView) Entries() []aicontext.EntryView {
+	return nil
+}
+
+func (v testPromptView) SectionEntries(section aicontext.Section) []aicontext.EntryView {
+	return nil
+}
+
+func (v testPromptView) Entry(id string) (aicontext.EntryView, bool) {
+	return aicontext.EntryView{}, false
 }
 
 func sessionMessage(id int, role aicontext.Role, text string) aicontext.Message {

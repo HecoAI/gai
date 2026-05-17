@@ -12,6 +12,7 @@ var (
 	ErrPromptMissing   = errors.New("prompt file is missing")
 
 	ErrPromptBuilderNil  = errors.New("prompt builder is nil")
+	ErrPromptEntryID     = errors.New("prompt entry ID error")
 	ErrPromptSource      = errors.New("prompt source error")
 	ErrUserPromptEmpty   = errors.New("user prompt is empty")
 	ErrTokenizerNotFound = errors.New("tokenizer not found")
