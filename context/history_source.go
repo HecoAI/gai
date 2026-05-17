@@ -23,7 +23,7 @@ func History(store SessionStore, id, tokenLimit int, tokenizer ai.Tokenizer) Sou
 	}
 }
 
-func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([]Part, error) {
+func (s *HistorySource) BuildParts(ctx stdcontext.Context, view PromptView) ([]Part, error) {
 	if s == nil || s.store == nil {
 		return nil, ErrSessionStoreNotFound
 	}
@@ -34,6 +34,10 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([
 	tokens := 0
 
 	convParts := []Part{}
+	var conv Conversation
+	if view != nil {
+		conv = view.Conversation()
+	}
 	if conv != nil {
 		renderedConv := renderMessages(conv.Messages())
 		if renderedConv != "" {
@@ -42,7 +46,7 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([
 				return nil, err
 			}
 			tokens += convTokens
-			convParts = append(convParts, StaticPart("current-loop", renderedConv).RequiredPart().WithTokens(convTokens))
+			convParts = append(convParts, NewPart("current-loop", renderedConv, Required(), Tokens(convTokens)))
 		}
 	}
 
@@ -68,7 +72,7 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([
 		}
 
 		tokens += messageTokens
-		part := StaticPart("history-"+strconv.Itoa(len(parts)), rendered).RequiredPart().WithTokens(messageTokens)
+		part := NewPart("history-"+strconv.Itoa(len(parts)), rendered, Required(), Tokens(messageTokens))
 		parts = append(parts, part)
 	}
 

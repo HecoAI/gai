@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/lace-ai/gai"
 	aicontext "github.com/lace-ai/gai/context"
 )
 
@@ -20,18 +21,19 @@ func TestPromptBuilderBuildsStructuredPrompt(t *testing.T) {
 
 	sourceCalled := false
 	builder := aicontext.NewPromptBuilder().
-		System(
-			aicontext.StaticPart("base", "base system").RequiredPart().WithTokens(12),
-			aicontext.StaticPart("dynamic", "dynamic system").WithTokens(4),
-		).
-		ContextSource("memory", aicontext.SourceFunc(func(ctx stdcontext.Context, conv aicontext.Conversation) ([]aicontext.Part, error) {
+		System("base", "base system", aicontext.Required(), aicontext.Tokens(12)).
+		System("dynamic", "dynamic system", aicontext.Tokens(4)).
+		Source(aicontext.SectionContext, "memory", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
 			sourceCalled = true
+			if _, ok := view.Entry("base"); !ok {
+				t.Fatal("expected source view to expose full configured plan")
+			}
 			return []aicontext.Part{
-				aicontext.StaticPart("history", "stored history"),
-				aicontext.StaticPart("current-loop", "current messages"),
+				aicontext.NewPart("history", "stored history"),
+				aicontext.NewPart("current-loop", "current messages"),
 			}, nil
-		}), true).
-		User(aicontext.StaticPart("request", "answer this").RequiredPart())
+		}), aicontext.Required()).
+		User("request", "answer this", aicontext.Required())
 
 	prompt, err := builder.BuildPrompt(stdcontext.Background(), emptyConversation{})
 	if err != nil {
@@ -52,13 +54,21 @@ func TestPromptBuilderBuildsStructuredPrompt(t *testing.T) {
 
 	assertContainsAll(t, prompt.Prompt, "user prompt", "answer this")
 	assertContainsNone(t, prompt.Prompt, "user prompt", "base system", "dynamic system", "stored history", "current messages")
+
+	trace := builder.LastTrace()
+	if len(trace.Entries) != 4 {
+		t.Fatalf("expected four traced entries, got %d", len(trace.Entries))
+	}
+	if got := len(trace.Parts[aicontext.SectionContext]); got != 2 {
+		t.Fatalf("expected two traced context parts, got %d", got)
+	}
 }
 
-func TestPromptBuilderEscapesPartNames(t *testing.T) {
+func TestPromptBuilderEscapesPartIDs(t *testing.T) {
 	t.Parallel()
 
 	prompt, err := aicontext.NewPromptBuilder().
-		User(aicontext.StaticPart(`request "<tag>"`, "answer this")).
+		User(`request "<tag>"`, "answer this").
 		BuildPrompt(stdcontext.Background(), emptyConversation{})
 	if err != nil {
 		t.Fatalf("BuildPrompt failed: %v", err)
@@ -66,6 +76,151 @@ func TestPromptBuilderEscapesPartNames(t *testing.T) {
 
 	assertContainsAll(t, prompt.Prompt, "user prompt", `request &#34;&lt;tag&gt;&#34;`, "answer this")
 	assertContainsNone(t, prompt.Prompt, "user prompt", `request "<tag>"`)
+}
+
+func TestPromptBuilderRejectsDuplicateIDs(t *testing.T) {
+	t.Parallel()
+
+	_, err := aicontext.NewPromptBuilder().
+		System("same", "system").
+		User("same", "user").
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err == nil {
+		t.Fatal("expected duplicate ID error")
+	}
+	if !errors.Is(err, aicontext.ErrPromptEntryID) {
+		t.Fatalf("expected ErrPromptEntryID, got %v", err)
+	}
+}
+
+func TestPromptBuilderRejectsDuplicateEmittedPartIDs(t *testing.T) {
+	t.Parallel()
+
+	_, err := aicontext.NewPromptBuilder().
+		System("base", "system").
+		Source(aicontext.SectionContext, "dup-source", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
+			return []aicontext.Part{aicontext.NewPart("base", "duplicate")}, nil
+		}), aicontext.Required()).
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err == nil {
+		t.Fatal("expected duplicate emitted part ID error")
+	}
+	if !errors.Is(err, aicontext.ErrPromptEntryID) {
+		t.Fatalf("expected ErrPromptEntryID, got %v", err)
+	}
+}
+
+func TestPromptBuilderSourceFailurePolicy(t *testing.T) {
+	t.Parallel()
+
+	sourceErr := errors.New("source unavailable")
+	failingSource := aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
+		return nil, sourceErr
+	})
+
+	builder := aicontext.NewPromptBuilder().
+		Context("kept", "kept context").
+		Source(aicontext.SectionContext, "optional-rag", failingSource, aicontext.Optional()).
+		User("request", "answer this", aicontext.Required())
+
+	prompt, err := builder.BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("optional source should be skipped, got error: %v", err)
+	}
+	if strings.Contains(prompt.Context, "optional-rag") {
+		t.Fatalf("optional failing source should not render: %q", prompt.Context)
+	}
+	if !strings.Contains(prompt.Context, "kept context") {
+		t.Fatalf("expected static context to remain: %q", prompt.Context)
+	}
+	if got := builder.LastTrace().Entries[1].Status; got != "skipped" {
+		t.Fatalf("expected optional source to be traced as skipped, got %q", got)
+	}
+
+	_, err = aicontext.NewPromptBuilder().
+		Source(aicontext.SectionContext, "required-rag", failingSource, aicontext.Required()).
+		User("request", "answer this", aicontext.Required()).
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err == nil {
+		t.Fatal("expected required source error")
+	}
+	if !errors.Is(err, aicontext.ErrPromptSource) {
+		t.Fatalf("expected ErrPromptSource, got %v", err)
+	}
+}
+
+func TestPromptBuilderSourceCanInspectWholePlan(t *testing.T) {
+	t.Parallel()
+
+	prompt, err := aicontext.NewPromptBuilder().
+		System("base", "base system", aicontext.Required(), aicontext.Meta("role", "base")).
+		Source(aicontext.SectionContext, "conditional", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
+			entry, ok := view.Entry("base")
+			if !ok || entry.Meta["role"] != "base" {
+				return nil, nil
+			}
+			if got := len(view.SectionEntries(aicontext.SectionUser)); got != 1 {
+				t.Fatalf("expected source to see later user entry, got %d", got)
+			}
+			return []aicontext.Part{aicontext.NewPart("conditional-context", "visible from source")}, nil
+		})).
+		User("request", "answer this").
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+	if !strings.Contains(prompt.Context, "visible from source") {
+		t.Fatalf("expected conditional source output: %q", prompt.Context)
+	}
+}
+
+func TestPromptBuilderUsesCustomRenderer(t *testing.T) {
+	t.Parallel()
+
+	renderer := sectionNameRenderer{}
+	prompt, err := aicontext.NewPromptBuilder().
+		Renderer(renderer).
+		System("base", "system").
+		Context("ctx", "context").
+		User("request", "user").
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+
+	if prompt.System != "system:base" || prompt.Context != "context:ctx" || prompt.Prompt != "user:request" {
+		t.Fatalf("custom renderer was not used: %+v", prompt)
+	}
+}
+
+func TestPromptBuilderEmitsDebugEvents(t *testing.T) {
+	t.Parallel()
+
+	var events []gai.DebugEvent
+	debug := gai.DebugSinkFunc(func(ctx stdcontext.Context, event gai.DebugEvent) {
+		events = append(events, event)
+	})
+
+	_, err := aicontext.NewPromptBuilder().
+		Debug(debug).
+		System("base", "system").
+		User("request", "user").
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+
+	if len(events) == 0 {
+		t.Fatal("expected debug events")
+	}
+	if events[0].Name != "prompt_build_started" {
+		t.Fatalf("expected first debug event to start build, got %q", events[0].Name)
+	}
+	for _, event := range events {
+		if _, ok := event.Fields["emitted_parts"]; ok {
+			t.Fatalf("non-sensitive debug sink should not receive emitted part text: %+v", event)
+		}
+	}
 }
 
 func assertContainsAll(t *testing.T, text, name string, values ...string) {
@@ -104,66 +259,12 @@ func assertOrdered(t *testing.T, text string, values ...string) {
 	}
 }
 
-func TestPromptBuilderSourceFailurePolicy(t *testing.T) {
-	t.Parallel()
-
-	sourceErr := errors.New("source unavailable")
-	failingSource := aicontext.SourceFunc(func(ctx stdcontext.Context, conv aicontext.Conversation) ([]aicontext.Part, error) {
-		return nil, sourceErr
-	})
-
-	prompt, err := aicontext.NewPromptBuilder().
-		Context(aicontext.StaticPart("kept", "kept context")).
-		ContextSource("optional-rag", failingSource, false).
-		User(aicontext.StaticPart("request", "answer this").RequiredPart()).
-		BuildPrompt(stdcontext.Background(), emptyConversation{})
-	if err != nil {
-		t.Fatalf("optional source should be skipped, got error: %v", err)
-	}
-	if strings.Contains(prompt.Context, "optional-rag") {
-		t.Fatalf("optional failing source should not render: %q", prompt.Context)
-	}
-	if !strings.Contains(prompt.Context, "kept context") {
-		t.Fatalf("expected static context to remain: %q", prompt.Context)
-	}
-
-	_, err = aicontext.NewPromptBuilder().
-		ContextSource("required-rag", failingSource, true).
-		User(aicontext.StaticPart("request", "answer this").RequiredPart()).
-		BuildPrompt(stdcontext.Background(), emptyConversation{})
-	if err == nil {
-		t.Fatal("expected required source error")
-	}
-	if !errors.Is(err, aicontext.ErrPromptSource) {
-		t.Fatalf("expected ErrPromptSource, got %v", err)
-	}
-}
-
-func TestPromptBuilderUsesCustomRenderer(t *testing.T) {
-	t.Parallel()
-
-	renderer := sectionNameRenderer{}
-	prompt, err := aicontext.NewPromptBuilder().
-		Renderer(renderer).
-		System(aicontext.StaticPart("base", "system")).
-		Context(aicontext.StaticPart("ctx", "context")).
-		User(aicontext.StaticPart("request", "user")).
-		BuildPrompt(stdcontext.Background(), emptyConversation{})
-	if err != nil {
-		t.Fatalf("BuildPrompt failed: %v", err)
-	}
-
-	if prompt.System != "system:base" || prompt.Context != "context:ctx" || prompt.Prompt != "user:request" {
-		t.Fatalf("custom renderer was not used: %+v", prompt)
-	}
-}
-
 type sectionNameRenderer struct{}
 
 func (sectionNameRenderer) Render(section aicontext.Section, parts []aicontext.Part) string {
-	names := make([]string, 0, len(parts))
+	ids := make([]string, 0, len(parts))
 	for _, part := range parts {
-		names = append(names, part.Name)
+		ids = append(ids, part.ID)
 	}
-	return string(section) + ":" + strings.Join(names, ",")
+	return string(section) + ":" + strings.Join(ids, ",")
 }
