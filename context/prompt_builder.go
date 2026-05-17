@@ -33,21 +33,6 @@ type Part struct {
 	Meta     map[string]any
 }
 
-func (p Part) WithTokens(tokens int) Part {
-	p.Tokens = tokens
-	return p
-}
-
-func (p Part) RequiredPart() Part {
-	p.Required = true
-	return p
-}
-
-func (p Part) OptionalPart() Part {
-	p.Required = false
-	return p
-}
-
 type Source interface {
 	BuildParts(ctx stdcontext.Context, view PromptView) ([]Part, error)
 }
