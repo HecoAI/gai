@@ -1,5 +1,10 @@
 package context
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Content is the atomic unit of a message
 type Content interface {
 	String() string
@@ -87,5 +92,40 @@ func NewToolResultErrContent(toolName, err string) ToolResultErrContent {
 	return ToolResultErrContent{
 		ToolName: toolName,
 		Err:      err,
+	}
+}
+
+func NewContentFromType(contentType string, data []byte) (Content, error) {
+	switch contentType {
+	case "text":
+		var textContent TextContent
+		err := json.Unmarshal(data, &textContent)
+		if err != nil {
+			return nil, err
+		}
+		return textContent, nil
+	case "tool_call":
+		var toolCallContent ToolCallContent
+		err := json.Unmarshal(data, &toolCallContent)
+		if err != nil {
+			return nil, err
+		}
+		return toolCallContent, nil
+	case "tool_result":
+		var toolResultContent ToolResultContent
+		err := json.Unmarshal(data, &toolResultContent)
+		if err != nil {
+			return nil, err
+		}
+		return toolResultContent, nil
+	case "tool_result_err":
+		var toolResultErrContent ToolResultErrContent
+		err := json.Unmarshal(data, &toolResultErrContent)
+		if err != nil {
+			return nil, err
+		}
+		return toolResultErrContent, nil
+	default:
+		return nil, fmt.Errorf("unknown content type: %s", contentType)
 	}
 }
