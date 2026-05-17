@@ -50,7 +50,7 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, conv Conversation) ([
 	parts := []Part{}
 	historyOffset := 0
 	for tokens < s.tokenLimit {
-		messages, err := s.store.GetMessages(s.id, 1, historyOffset)
+		messages, err := s.store.GetMessages(ctx, s.id, 1, historyOffset)
 		if err != nil {
 			return nil, err
 		}
