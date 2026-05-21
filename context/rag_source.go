@@ -25,7 +25,7 @@ func RAG(store RAGStore, limit int, query RAGQueryFunc) Source {
 
 func (s *RAGSource) BuildParts(ctx stdcontext.Context, view PromptView, budget SourceBudget) ([]Part, error) {
 	if s == nil || s.store == nil {
-		return nil, ErrSessionStoreNotFound
+		return nil, ErrRAGStoreNotFound
 	}
 	if s.query == nil {
 		return nil, fmt.Errorf("%w: rag query function is nil", ErrPromptSource)

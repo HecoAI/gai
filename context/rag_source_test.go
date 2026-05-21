@@ -2,6 +2,7 @@ package context_test
 
 import (
 	stdcontext "context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -50,6 +51,21 @@ func TestXMLRendererRendersPartGroupAsSinglePart(t *testing.T) {
 		t.Fatalf("expected one outer part, got %q", rendered)
 	}
 	assertContainsAll(t, rendered, "rendered group", `<item id="doc-1">`, `<item id="doc-2">`)
+}
+
+func TestRAGSourceRequiresRAGStore(t *testing.T) {
+	t.Parallel()
+
+	_, err := aicontext.RAG(nil, 1, func(ctx stdcontext.Context, view aicontext.PromptView) (string, error) {
+		return "query", nil
+	}).BuildParts(stdcontext.Background(), testPromptView{}, aicontext.SourceBudget{
+		Tokenizer:             whitespaceTokenizer{},
+		MaxTokens:             4,
+		RemainingPromptTokens: 4,
+	})
+	if !errors.Is(err, aicontext.ErrRAGStoreNotFound) {
+		t.Fatalf("expected ErrRAGStoreNotFound, got %v", err)
+	}
 }
 
 type fakeRAGStore struct {
