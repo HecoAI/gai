@@ -2,12 +2,15 @@ package summary_test
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lace-ai/gai/agent/summary"
 	"github.com/lace-ai/gai/ai"
 	aicontext "github.com/lace-ai/gai/context"
+	"github.com/lace-ai/gai/loop"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
 
@@ -56,6 +59,56 @@ func TestDefinitionAllowsSystemPromptOverride(t *testing.T) {
 	}
 }
 
+func TestSummarizerDrainsLoopErrorsWhileWaitingForTokens(t *testing.T) {
+	t.Parallel()
+
+	model := toolCallModel{
+		tokens: []ai.Token{
+			{
+				Type: ai.TokenTypeToolCall,
+				ToolCall: &ai.ToolCall{
+					ID:   "call_1",
+					Type: "function",
+					Name: "lookup",
+					Args: []byte(`{"query":"first"}`),
+				},
+			},
+			{
+				Type: ai.TokenTypeToolCall,
+				ToolCall: &ai.ToolCall{
+					ID:   "call_2",
+					Type: "function",
+					Name: "lookup",
+					Args: []byte(`{"query":"second"}`),
+				},
+			},
+		},
+	}
+	summarizer := summary.New(
+		model,
+		summary.WithTools(staticTool{name: "lookup"}),
+		summary.WithPreProcessor(failingPreProcessor{err: errors.New("preprocess failed")}),
+	)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := summarizer.Summarize(context.Background(), aicontext.SummaryRequest{Text: "input"})
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected preprocessing error")
+		}
+		if !strings.Contains(err.Error(), "preprocess failed") {
+			t.Fatalf("expected preprocessing error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Summarize blocked while loop errors were waiting to be drained")
+	}
+}
+
 type recordingModel struct {
 	response string
 	request  ai.AIRequest
@@ -86,4 +139,63 @@ func (m *recordingModel) Close() error {
 
 func (m *recordingModel) Tokenizer() ai.Tokenizer {
 	return mocks.MockTokenizer{}
+}
+
+type toolCallModel struct {
+	tokens []ai.Token
+}
+
+func (m toolCallModel) Name() string {
+	return "tool-call"
+}
+
+func (m toolCallModel) Generate(context.Context, ai.AIRequest) (*ai.AIResponse, error) {
+	return &ai.AIResponse{}, nil
+}
+
+func (m toolCallModel) GenerateStream(context.Context, ai.AIRequest) <-chan ai.Token {
+	out := make(chan ai.Token, len(m.tokens))
+	go func() {
+		defer close(out)
+		for _, token := range m.tokens {
+			out <- token
+		}
+	}()
+	return out
+}
+
+func (m toolCallModel) Close() error {
+	return nil
+}
+
+func (m toolCallModel) Tokenizer() ai.Tokenizer {
+	return mocks.MockTokenizer{}
+}
+
+type staticTool struct {
+	name string
+}
+
+func (t staticTool) Name() string {
+	return t.name
+}
+
+func (t staticTool) Description() string {
+	return "static test tool"
+}
+
+func (t staticTool) Params() string {
+	return "{}"
+}
+
+func (t staticTool) Function(*ai.ToolCall) *loop.ToolResponse {
+	return &loop.ToolResponse{Text: "ok"}
+}
+
+type failingPreProcessor struct {
+	err error
+}
+
+func (p failingPreProcessor) Process(ai.ToolCall, *loop.ToolResponse) error {
+	return p.err
 }

@@ -138,11 +138,22 @@ func (s Summarizer) Summarize(ctx context.Context, req aicontext.SummaryRequest)
 		for range statusCh {
 		}
 	}()
+	errDone := make(chan error, 1)
+	go func() {
+		var firstErr error
+		for err := range errCh {
+			if firstErr == nil && err != nil {
+				firstErr = err
+			}
+		}
+		errDone <- firstErr
+	}()
 
 	var summary []byte
 	for token := range tokenCh {
 		if token.Err != nil {
 			<-statusDone
+			<-errDone
 			return "", token.Err
 		}
 		switch token.Type {
@@ -156,10 +167,8 @@ func (s Summarizer) Summarize(ctx context.Context, req aicontext.SummaryRequest)
 	}
 
 	<-statusDone
-	for err := range errCh {
-		if err != nil {
-			return "", err
-		}
+	if err := <-errDone; err != nil {
+		return "", err
 	}
 	if len(summary) == 0 {
 		return "", fmt.Errorf("%w: summary agent produced no text", aicontext.ErrPromptSource)
