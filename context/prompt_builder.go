@@ -827,7 +827,7 @@ func renderPrompt(renderer Renderer, parts map[Section][]Part) ai.Prompt {
 }
 
 func promptBudgetError(id string, used, available int) error {
-	return fmt.Errorf("%w: %q needs %d tokens, only %d available", ErrPromptBudget, id, used, available)
+	return fmt.Errorf("%w: prompt with %q would use %d tokens, only %d available", ErrPromptBudget, id, used, available)
 }
 
 func markRequired(parts []Part) {

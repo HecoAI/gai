@@ -264,6 +264,9 @@ func TestPromptBuilderFailsRequiredOverBudget(t *testing.T) {
 	if !errors.Is(err, aicontext.ErrPromptBudget) {
 		t.Fatalf("expected ErrPromptBudget, got %v", err)
 	}
+	if !strings.Contains(err.Error(), `prompt with "`) || !strings.Contains(err.Error(), "would use") {
+		t.Fatalf("expected prompt-wide budget error wording, got %v", err)
+	}
 }
 
 func TestPromptBuilderPassesSourceCap(t *testing.T) {
