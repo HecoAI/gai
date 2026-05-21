@@ -130,13 +130,16 @@ type BuildTrace struct {
 }
 
 type BuildTraceEntry struct {
-	ID              string
-	Section         Section
-	Kind            EntryKind
-	Status          string
-	Reason          string
-	Required        bool
-	Parts           []Part
+	ID           string
+	Section      Section
+	Kind         EntryKind
+	Status       string
+	Reason       string
+	Required     bool
+	Parts        []Part
+	EntryTokens  int
+	PromptTokens int
+	// TokenCount is kept as a compatibility alias for EntryTokens.
 	TokenCount      int
 	AvailableTokens int
 	Err             error
@@ -380,6 +383,18 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 		switch entry.kind {
 		case EntryKindPart:
 			part := entry.part()
+			if b.budget != nil && part.Tokens == 0 && part.Text != "" {
+				tokens, err := b.budget.Tokenizer.CountTokens(ctx, part.Text)
+				if err != nil {
+					traceEntry.Err = err
+					traceEntry.Status = "error"
+					trace.Entries = append(trace.Entries, traceEntry)
+					b.trace = finalizeTrace(trace, parts)
+					b.emitEntry(ctx, "prompt_entry_error", traceEntry)
+					return ai.Prompt{}, err
+				}
+				part.Tokens = tokens
+			}
 			nextPartIDs := clonePartIDMap(partIDs)
 			if err := validatePartIDs(nextPartIDs, entry.section, []Part{part}); err != nil {
 				traceEntry.Err = err
@@ -400,7 +415,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					b.emitEntry(ctx, "prompt_entry_error", traceEntry)
 					return ai.Prompt{}, err
 				}
-				traceEntry.TokenCount = count
+				setTraceTokens(&traceEntry, part.tokenCount(), count)
 				traceEntry.AvailableTokens = available
 				if entry.required {
 					cleanedParts, ok, retryCount, retryAvailable, err := b.partsFitAfterDroppingOptionalContext(ctx, renderer, parts, entry.section, next)
@@ -418,7 +433,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 						promptTokens = retryCount
 						trace.Entries = markDroppedOptionalContextEntries(trace.Entries)
 						traceEntry.Reason = "dropped_optional_context"
-						traceEntry.TokenCount = retryCount
+						setTraceTokens(&traceEntry, part.tokenCount(), retryCount)
 						traceEntry.AvailableTokens = retryAvailable
 						traceEntry.Status = "emitted"
 						traceEntry.Parts = []Part{part}
@@ -459,7 +474,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					traceEntry.Status = "summarized"
 					traceEntry.Reason = "optional_summarized"
 					traceEntry.Parts = []Part{summarizedPart}
-					traceEntry.TokenCount = summaryCount
+					setTraceTokens(&traceEntry, summaryCount, summaryPromptCount)
 					traceEntry.AvailableTokens = summaryAvailable
 					b.emitEntry(ctx, "prompt_entry_summarized", traceEntry)
 					break
@@ -473,7 +488,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 			promptTokens = count
 			traceEntry.Status = "emitted"
 			traceEntry.Parts = []Part{part}
-			traceEntry.TokenCount = part.tokenCount()
+			setTraceTokens(&traceEntry, part.tokenCount(), count)
 			b.emitEntry(ctx, "prompt_entry_emitted", traceEntry)
 		case EntryKindSource:
 			if entry.source == nil {
@@ -543,7 +558,8 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					b.emitEntry(ctx, "prompt_source_error", traceEntry)
 					return ai.Prompt{}, err
 				}
-				traceEntry.TokenCount = count
+				sourceTokens := partsTokenCount(sourceParts)
+				setTraceTokens(&traceEntry, sourceTokens, count)
 				traceEntry.AvailableTokens = available
 				if entry.required {
 					cleanedParts, ok, retryCount, retryAvailable, err := b.partsFitAfterDroppingOptionalContext(ctx, renderer, parts, entry.section, next)
@@ -563,7 +579,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 						traceEntry.Reason = "dropped_optional_context"
 						traceEntry.Status = "emitted"
 						traceEntry.Parts = cloneParts(sourceParts)
-						traceEntry.TokenCount = retryCount
+						setTraceTokens(&traceEntry, sourceTokens, retryCount)
 						traceEntry.AvailableTokens = retryAvailable
 						b.emitEntry(ctx, "prompt_source_emitted", traceEntry)
 						break
@@ -589,7 +605,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 			promptTokens = count
 			traceEntry.Status = "emitted"
 			traceEntry.Parts = cloneParts(sourceParts)
-			traceEntry.TokenCount = partsTokenCount(sourceParts)
+			setTraceTokens(&traceEntry, partsTokenCount(sourceParts), count)
 			b.emitEntry(ctx, "prompt_source_emitted", traceEntry)
 		}
 
@@ -833,6 +849,12 @@ func partsTokenCount(parts []Part) int {
 	return tokens
 }
 
+func setTraceTokens(entry *BuildTraceEntry, entryTokens, promptTokens int) {
+	entry.EntryTokens = entryTokens
+	entry.PromptTokens = promptTokens
+	entry.TokenCount = entryTokens
+}
+
 func (b *Builder) emitEntry(ctx stdcontext.Context, name string, entry BuildTraceEntry) {
 	fields := map[string]any{
 		"id":               entry.ID,
@@ -841,6 +863,8 @@ func (b *Builder) emitEntry(ctx stdcontext.Context, name string, entry BuildTrac
 		"status":           entry.Status,
 		"required":         entry.Required,
 		"parts":            len(entry.Parts),
+		"entry_tokens":     entry.EntryTokens,
+		"prompt_tokens":    entry.PromptTokens,
 		"token_count":      entry.TokenCount,
 		"available_tokens": entry.AvailableTokens,
 	}

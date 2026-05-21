@@ -269,6 +269,34 @@ func TestPromptBuilderFailsRequiredOverBudget(t *testing.T) {
 	}
 }
 
+func TestPromptBuilderTraceSplitsEntryAndPromptTokens(t *testing.T) {
+	t.Parallel()
+
+	builder := aicontext.NewPromptBuilder().
+		Budget(aicontext.PromptBudget{
+			Tokenizer:           whitespaceTokenizer{},
+			ContextWindowTokens: 100,
+		}).
+		System("system", "system", aicontext.Required()).
+		User("request", "question", aicontext.Required())
+	_, err := builder.BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+
+	trace := builder.LastTrace()
+	request := traceEntry(t, trace, "request")
+	if request.EntryTokens == 0 {
+		t.Fatalf("expected entry tokens: %+v", request)
+	}
+	if request.PromptTokens <= request.EntryTokens {
+		t.Fatalf("expected prompt tokens to include prior rendered prompt: %+v", request)
+	}
+	if request.TokenCount != request.EntryTokens {
+		t.Fatalf("expected TokenCount compatibility alias to match entry tokens: %+v", request)
+	}
+}
+
 func TestPromptBuilderPassesSourceCap(t *testing.T) {
 	t.Parallel()
 
@@ -306,7 +334,7 @@ func TestPromptBuilderReusesTokenCountForSourceBudget(t *testing.T) {
 		}).
 		System("system", "system", aicontext.Required()).
 		Source(aicontext.SectionContext, "source", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
-			if tokenizer.CountCalls != 1 {
+			if tokenizer.CountCalls != 2 {
 				t.Fatalf("source budget should reuse current prompt count, got %d token counts before source", tokenizer.CountCalls)
 			}
 			return []aicontext.Part{aicontext.NewPart("source-part", "source", aicontext.Required())}, nil
@@ -464,13 +492,18 @@ func assertContainsAll(t *testing.T, text, name string, values ...string) {
 
 func traceEntryStatus(t *testing.T, trace aicontext.BuildTrace, id string) string {
 	t.Helper()
+	return traceEntry(t, trace, id).Status
+}
+
+func traceEntry(t *testing.T, trace aicontext.BuildTrace, id string) aicontext.BuildTraceEntry {
+	t.Helper()
 	for _, entry := range trace.Entries {
 		if entry.ID == id {
-			return entry.Status
+			return entry
 		}
 	}
 	t.Fatalf("trace entry %q not found: %+v", id, trace.Entries)
-	return ""
+	return aicontext.BuildTraceEntry{}
 }
 
 func assertContainsNone(t *testing.T, text, name string, values ...string) {
