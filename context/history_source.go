@@ -73,7 +73,7 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, view PromptView, budg
 				}
 			}
 			tokens += convTokens
-			convParts = append(convParts, NewPart("current-loop", renderedConv, Required(), Tokens(convTokens)))
+			convParts = append(convParts, newHistoryPart("current-loop", renderedConv, convTokens, budget.Required))
 		}
 	}
 
@@ -99,10 +99,18 @@ func (s *HistorySource) BuildParts(ctx stdcontext.Context, view PromptView, budg
 		}
 
 		tokens += messageTokens
-		part := NewPart("history-"+strconv.Itoa(len(parts)), rendered, Required(), Tokens(messageTokens))
+		part := newHistoryPart("history-"+strconv.Itoa(len(parts)), rendered, messageTokens, budget.Required)
 		parts = append(parts, part)
 	}
 
 	parts = append(parts, convParts...)
 	return parts, nil
+}
+
+func newHistoryPart(id, text string, tokens int, required bool) Part {
+	opts := []EntryOption{Tokens(tokens)}
+	if required {
+		opts = append(opts, Required())
+	}
+	return NewPart(id, text, opts...)
 }

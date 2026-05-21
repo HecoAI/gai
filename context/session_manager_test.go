@@ -76,6 +76,39 @@ func TestHistorySourceFailsWhenRequiredCurrentLoopExceedsBudget(t *testing.T) {
 	}
 }
 
+func TestHistorySourceUsesEntryRequiredness(t *testing.T) {
+	t.Parallel()
+
+	store := &mocks.MockSessionStore{
+		Messages: []aicontext.Message{
+			sessionMessage(1, aicontext.RoleUser, "stored one"),
+		},
+	}
+	conv := fakeConversation{
+		messages: []aicontext.Message{
+			sessionMessage(0, aicontext.RoleUser, "current question"),
+		},
+	}
+
+	parts, err := aicontext.History(store, 7).BuildParts(stdcontext.Background(), testPromptView{conv: conv}, aicontext.SourceBudget{
+		Tokenizer:             whitespaceTokenizer{},
+		MaxTokens:             20,
+		RemainingPromptTokens: 20,
+		Required:              false,
+	})
+	if err != nil {
+		t.Fatalf("BuildParts failed: %v", err)
+	}
+	if len(parts) == 0 {
+		t.Fatal("expected optional history parts")
+	}
+	for _, part := range parts {
+		if part.Required {
+			t.Fatalf("optional history source should not mark emitted parts required: %+v", parts)
+		}
+	}
+}
+
 func TestHistorySourceSkipsEmptyCurrentLoop(t *testing.T) {
 	t.Parallel()
 
