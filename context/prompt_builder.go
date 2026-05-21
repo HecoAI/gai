@@ -4,6 +4,7 @@ import (
 	stdcontext "context"
 	"encoding/xml"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/lace-ai/gai"
@@ -25,22 +26,84 @@ const (
 	EntryKindSource EntryKind = "source"
 )
 
+const unlimitedTokens = math.MaxInt
+
 type Part struct {
 	ID       string
 	Text     string
 	Tokens   int
 	Required bool
 	Meta     map[string]any
+	Children []Part
+}
+
+func (p Part) tokenCount() int {
+	if p.Tokens > 0 {
+		return p.Tokens
+	}
+	tokens := 0
+	for _, child := range p.Children {
+		tokens += child.tokenCount()
+	}
+	return tokens
+}
+
+type PromptBudget struct {
+	Tokenizer                   ai.Tokenizer
+	ContextWindowTokens         int
+	ReservedOutputTokens        int
+	SourceOverheadReserveTokens int
+	Summarizer                  Summarizer
+}
+
+func (b PromptBudget) promptLimit() int {
+	limit := b.ContextWindowTokens - b.ReservedOutputTokens
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
+type SourceBudget struct {
+	Tokenizer             ai.Tokenizer
+	MaxTokens             int
+	RemainingPromptTokens int
+	Required              bool
+	OverheadReserveTokens int
+	Summarizer            Summarizer
+}
+
+func (b SourceBudget) ContentLimit() int {
+	if b.MaxTokens == unlimitedTokens {
+		return unlimitedTokens
+	}
+	limit := b.MaxTokens - b.OverheadReserveTokens
+	if limit < 0 {
+		return 0
+	}
+	return limit
+}
+
+type SummaryRequest struct {
+	ID        string
+	Text      string
+	MaxTokens int
+	Required  bool
+	Meta      map[string]any
+}
+
+type Summarizer interface {
+	Summarize(ctx stdcontext.Context, req SummaryRequest) (string, error)
 }
 
 type Source interface {
-	BuildParts(ctx stdcontext.Context, view PromptView) ([]Part, error)
+	BuildParts(ctx stdcontext.Context, view PromptView, budget SourceBudget) ([]Part, error)
 }
 
-type SourceFunc func(ctx stdcontext.Context, view PromptView) ([]Part, error)
+type SourceFunc func(ctx stdcontext.Context, view PromptView, budget SourceBudget) ([]Part, error)
 
-func (f SourceFunc) BuildParts(ctx stdcontext.Context, view PromptView) ([]Part, error) {
-	return f(ctx, view)
+func (f SourceFunc) BuildParts(ctx stdcontext.Context, view PromptView, budget SourceBudget) ([]Part, error) {
+	return f(ctx, view, budget)
 }
 
 type PromptView interface {
@@ -51,13 +114,14 @@ type PromptView interface {
 }
 
 type EntryView struct {
-	ID       string
-	Section  Section
-	Kind     EntryKind
-	Required bool
-	Tokens   int
-	Text     string
-	Meta     map[string]any
+	ID        string
+	Section   Section
+	Kind      EntryKind
+	Required  bool
+	Tokens    int
+	SourceCap int
+	Text      string
+	Meta      map[string]any
 }
 
 type BuildTrace struct {
@@ -66,13 +130,16 @@ type BuildTrace struct {
 }
 
 type BuildTraceEntry struct {
-	ID       string
-	Section  Section
-	Kind     EntryKind
-	Status   string
-	Required bool
-	Parts    []Part
-	Err      error
+	ID              string
+	Section         Section
+	Kind            EntryKind
+	Status          string
+	Reason          string
+	Required        bool
+	Parts           []Part
+	TokenCount      int
+	AvailableTokens int
+	Err             error
 }
 
 type Renderer interface {
@@ -91,21 +158,32 @@ func (r XMLRenderer) Render(section Section, parts []Part) string {
 	builder.WriteString(string(section))
 	builder.WriteString(">\n")
 	for _, part := range parts {
-		builder.WriteString(`<part id="`)
-		writeEscaped(&builder, part.ID)
-		builder.WriteString(`">`)
-		if part.Text != "" {
-			builder.WriteString("\n")
-			writeEscaped(&builder, part.Text)
-			builder.WriteString("\n")
-		}
-		builder.WriteString("</part>\n")
+		writeXMLPart(&builder, part, "part")
 	}
 	builder.WriteString("</")
 	builder.WriteString(string(section))
 	builder.WriteString(">\n")
 
 	return builder.String()
+}
+
+func writeXMLPart(builder *strings.Builder, part Part, tag string) {
+	builder.WriteString("<")
+	builder.WriteString(tag)
+	builder.WriteString(` id="`)
+	writeEscaped(builder, part.ID)
+	builder.WriteString(`">`)
+	if part.Text != "" {
+		builder.WriteString("\n")
+		writeEscaped(builder, part.Text)
+		builder.WriteString("\n")
+	}
+	for _, child := range part.Children {
+		writeXMLPart(builder, child, "item")
+	}
+	builder.WriteString("</")
+	builder.WriteString(tag)
+	builder.WriteString(">\n")
 }
 
 func writeEscaped(builder *strings.Builder, text string) {
@@ -122,19 +200,22 @@ type PromptBuilder interface {
 type Builder struct {
 	renderer Renderer
 	debug    gai.DebugSink
+	budget   *PromptBudget
 	entries  []builderEntry
 	trace    BuildTrace
 }
 
 type builderEntry struct {
-	id       string
-	section  Section
-	kind     EntryKind
-	required bool
-	tokens   int
-	text     string
-	meta     map[string]any
-	source   Source
+	id           string
+	section      Section
+	kind         EntryKind
+	required     bool
+	tokens       int
+	sourceCap    int
+	hasSourceCap bool
+	text         string
+	meta         map[string]any
+	source       Source
 }
 
 type EntryOption func(*builderEntry)
@@ -155,6 +236,13 @@ func Optional() EntryOption {
 func Tokens(tokens int) EntryOption {
 	return func(entry *builderEntry) {
 		entry.tokens = tokens
+	}
+}
+
+func SourceTokenCap(tokens int) EntryOption {
+	return func(entry *builderEntry) {
+		entry.sourceCap = tokens
+		entry.hasSourceCap = true
 	}
 }
 
@@ -183,6 +271,22 @@ func NewPart(id, text string, opts ...EntryOption) Part {
 	return entry.part()
 }
 
+func NewPartGroup(id string, children []Part, opts ...EntryOption) Part {
+	entry := builderEntry{
+		id:   id,
+		kind: EntryKindPart,
+	}
+	applyOptions(&entry, opts)
+	part := entry.part()
+	part.Children = cloneParts(children)
+	if part.Tokens == 0 {
+		for _, child := range children {
+			part.Tokens += child.tokenCount()
+		}
+	}
+	return part
+}
+
 func (b *Builder) Renderer(renderer Renderer) *Builder {
 	if renderer != nil {
 		b.renderer = renderer
@@ -192,6 +296,11 @@ func (b *Builder) Renderer(renderer Renderer) *Builder {
 
 func (b *Builder) Debug(debug gai.DebugSink) *Builder {
 	b.debug = debug
+	return b
+}
+
+func (b *Builder) Budget(budget PromptBudget) *Builder {
+	b.budget = &budget
 	return b
 }
 
@@ -270,7 +379,8 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 		switch entry.kind {
 		case EntryKindPart:
 			part := entry.part()
-			if err := validatePartIDs(partIDs, entry.section, []Part{part}); err != nil {
+			nextPartIDs := clonePartIDMap(partIDs)
+			if err := validatePartIDs(nextPartIDs, entry.section, []Part{part}); err != nil {
 				traceEntry.Err = err
 				traceEntry.Status = "error"
 				trace.Entries = append(trace.Entries, traceEntry)
@@ -278,9 +388,60 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 				b.emitEntry(ctx, "prompt_entry_error", traceEntry)
 				return ai.Prompt{}, err
 			}
-			parts[entry.section] = append(parts[entry.section], part)
+			next := append(cloneParts(parts[entry.section]), part)
+			if ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next); !ok || err != nil {
+				if err != nil {
+					traceEntry.Err = err
+					traceEntry.Status = "error"
+					trace.Entries = append(trace.Entries, traceEntry)
+					b.trace = finalizeTrace(trace, parts)
+					b.emitEntry(ctx, "prompt_entry_error", traceEntry)
+					return ai.Prompt{}, err
+				}
+				traceEntry.TokenCount = count
+				traceEntry.AvailableTokens = available
+				if entry.required || entry.section == SectionSystem || entry.section == SectionUser {
+					cleanedParts, ok, retryCount, retryAvailable, err := b.partsFitAfterDroppingOptionalContext(ctx, renderer, parts, entry.section, next)
+					if err != nil {
+						traceEntry.Err = err
+						traceEntry.Status = "error"
+						trace.Entries = append(trace.Entries, traceEntry)
+						b.trace = finalizeTrace(trace, parts)
+						b.emitEntry(ctx, "prompt_entry_error", traceEntry)
+						return ai.Prompt{}, err
+					}
+					if ok {
+						parts = cleanedParts
+						partIDs = rebuildPartIDs(parts)
+						trace.Entries = markDroppedOptionalContextEntries(trace.Entries)
+						traceEntry.Reason = "dropped_optional_context"
+						traceEntry.TokenCount = retryCount
+						traceEntry.AvailableTokens = retryAvailable
+						traceEntry.Status = "emitted"
+						traceEntry.Parts = []Part{part}
+						b.emitEntry(ctx, "prompt_entry_emitted", traceEntry)
+						break
+					}
+					err = promptBudgetError(entry.id, count, available)
+					traceEntry.Err = err
+					traceEntry.Status = "error"
+					traceEntry.Reason = "required_over_budget"
+					trace.Entries = append(trace.Entries, traceEntry)
+					b.trace = finalizeTrace(trace, parts)
+					b.emitEntry(ctx, "prompt_entry_error", traceEntry)
+					return ai.Prompt{}, err
+				}
+				traceEntry.Status = "dropped"
+				traceEntry.Reason = "optional_over_budget"
+				trace.Entries = append(trace.Entries, traceEntry)
+				b.emitEntry(ctx, "prompt_entry_dropped", traceEntry)
+				continue
+			}
+			parts[entry.section] = next
+			partIDs = nextPartIDs
 			traceEntry.Status = "emitted"
 			traceEntry.Parts = []Part{part}
+			traceEntry.TokenCount = part.tokenCount()
 			b.emitEntry(ctx, "prompt_entry_emitted", traceEntry)
 		case EntryKindSource:
 			if entry.source == nil {
@@ -294,12 +455,23 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					return ai.Prompt{}, err
 				}
 				traceEntry.Status = "skipped"
+				traceEntry.Reason = "nil_source"
 				trace.Entries = append(trace.Entries, traceEntry)
 				b.emitEntry(ctx, "prompt_source_skipped", traceEntry)
 				continue
 			}
 
-			sourceParts, err := entry.source.BuildParts(ctx, view)
+			sourceBudget, err := b.sourceBudget(ctx, renderer, parts, entry)
+			if err != nil {
+				traceEntry.Err = err
+				traceEntry.Status = "error"
+				trace.Entries = append(trace.Entries, traceEntry)
+				b.trace = finalizeTrace(trace, parts)
+				b.emitEntry(ctx, "prompt_source_error", traceEntry)
+				return ai.Prompt{}, err
+			}
+			traceEntry.AvailableTokens = sourceBudget.MaxTokens
+			sourceParts, err := entry.source.BuildParts(ctx, view, sourceBudget)
 			if err != nil {
 				traceEntry.Err = err
 				if entry.required {
@@ -312,16 +484,16 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					return ai.Prompt{}, wrapped
 				}
 				traceEntry.Status = "skipped"
+				traceEntry.Reason = "optional_source_error"
 				trace.Entries = append(trace.Entries, traceEntry)
 				b.emitEntry(ctx, "prompt_source_skipped", traceEntry)
 				continue
 			}
 			if entry.required {
-				for i := range sourceParts {
-					sourceParts[i].Required = true
-				}
+				markRequired(sourceParts)
 			}
-			if err := validatePartIDs(partIDs, entry.section, sourceParts); err != nil {
+			nextPartIDs := clonePartIDMap(partIDs)
+			if err := validatePartIDs(nextPartIDs, entry.section, sourceParts); err != nil {
 				traceEntry.Err = err
 				if entry.required {
 					traceEntry.Status = "error"
@@ -331,13 +503,66 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					return ai.Prompt{}, err
 				}
 				traceEntry.Status = "skipped"
+				traceEntry.Reason = "duplicate_part_id"
 				trace.Entries = append(trace.Entries, traceEntry)
 				b.emitEntry(ctx, "prompt_source_skipped", traceEntry)
 				continue
 			}
-			parts[entry.section] = append(parts[entry.section], sourceParts...)
+			next := append(cloneParts(parts[entry.section]), sourceParts...)
+			if ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next); !ok || err != nil {
+				if err != nil {
+					traceEntry.Err = err
+					traceEntry.Status = "error"
+					trace.Entries = append(trace.Entries, traceEntry)
+					b.trace = finalizeTrace(trace, parts)
+					b.emitEntry(ctx, "prompt_source_error", traceEntry)
+					return ai.Prompt{}, err
+				}
+				traceEntry.TokenCount = count
+				traceEntry.AvailableTokens = available
+				if entry.required {
+					cleanedParts, ok, retryCount, retryAvailable, err := b.partsFitAfterDroppingOptionalContext(ctx, renderer, parts, entry.section, next)
+					if err != nil {
+						traceEntry.Err = err
+						traceEntry.Status = "error"
+						trace.Entries = append(trace.Entries, traceEntry)
+						b.trace = finalizeTrace(trace, parts)
+						b.emitEntry(ctx, "prompt_source_error", traceEntry)
+						return ai.Prompt{}, err
+					}
+					if ok {
+						parts = cleanedParts
+						partIDs = rebuildPartIDs(parts)
+						trace.Entries = markDroppedOptionalContextEntries(trace.Entries)
+						traceEntry.Reason = "dropped_optional_context"
+						traceEntry.Status = "emitted"
+						traceEntry.Parts = cloneParts(sourceParts)
+						traceEntry.TokenCount = retryCount
+						traceEntry.AvailableTokens = retryAvailable
+						b.emitEntry(ctx, "prompt_source_emitted", traceEntry)
+						break
+					}
+					err = promptBudgetError(entry.id, count, available)
+					traceEntry.Err = err
+					traceEntry.Status = "error"
+					traceEntry.Reason = "required_over_budget"
+					trace.Entries = append(trace.Entries, traceEntry)
+					b.trace = finalizeTrace(trace, parts)
+					b.emitEntry(ctx, "prompt_source_error", traceEntry)
+					return ai.Prompt{}, err
+				}
+				traceEntry.Status = "dropped"
+				traceEntry.Reason = "optional_over_budget"
+				traceEntry.Parts = cloneParts(sourceParts)
+				trace.Entries = append(trace.Entries, traceEntry)
+				b.emitEntry(ctx, "prompt_source_dropped", traceEntry)
+				continue
+			}
+			parts[entry.section] = next
+			partIDs = nextPartIDs
 			traceEntry.Status = "emitted"
 			traceEntry.Parts = cloneParts(sourceParts)
+			traceEntry.TokenCount = partsTokenCount(sourceParts)
 			b.emitEntry(ctx, "prompt_source_emitted", traceEntry)
 		}
 
@@ -346,10 +571,22 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 
 	trace = finalizeTrace(trace, parts)
 	b.trace = trace
-	prompt := ai.Prompt{
-		System:  renderer.Render(SectionSystem, parts[SectionSystem]),
-		Context: renderer.Render(SectionContext, parts[SectionContext]),
-		Prompt:  renderer.Render(SectionUser, parts[SectionUser]),
+	prompt := renderPrompt(renderer, parts)
+	if b.budget != nil {
+		count, err := b.budget.Tokenizer.CountTokens(ctx, prompt.CombinedPrompt())
+		if err != nil {
+			b.emit(ctx, "prompt_build_failed", map[string]any{"error": err.Error()}, err)
+			return ai.Prompt{}, err
+		}
+		if count > b.budget.promptLimit() {
+			err := promptBudgetError("prompt", count, b.budget.promptLimit())
+			b.emit(ctx, "prompt_build_failed", map[string]any{
+				"error":            err.Error(),
+				"prompt_tokens":    count,
+				"available_tokens": b.budget.promptLimit(),
+			}, err)
+			return ai.Prompt{}, err
+		}
 	}
 	b.emit(ctx, "prompt_build_completed", map[string]any{
 		"system_parts":  len(parts[SectionSystem]),
@@ -372,7 +609,18 @@ func (b *Builder) validate() error {
 		if section, ok := seen[entry.id]; ok {
 			return fmt.Errorf("%w: duplicate entry ID %q in sections %s and %s", ErrPromptEntryID, entry.id, section, entry.section)
 		}
+		if entry.hasSourceCap && entry.sourceCap < 0 {
+			return fmt.Errorf("%w: source %q has negative token cap", ErrPromptBudget, entry.id)
+		}
 		seen[entry.id] = entry.section
+	}
+	if b.budget != nil {
+		if b.budget.Tokenizer == nil {
+			return ErrTokenizerNotFound
+		}
+		if b.budget.promptLimit() <= 0 {
+			return fmt.Errorf("%w: prompt token limit must be positive", ErrPromptBudget)
+		}
 	}
 	return nil
 }
@@ -380,7 +628,8 @@ func (b *Builder) validate() error {
 func validatePartIDs(seen map[string]Section, section Section, parts []Part) error {
 	pending := make([]string, 0, len(parts))
 	local := map[string]struct{}{}
-	for _, part := range parts {
+	var visit func(Part) error
+	visit = func(part Part) error {
 		if strings.TrimSpace(part.ID) == "" {
 			return fmt.Errorf("%w: emitted part ID is empty in section %s", ErrPromptEntryID, section)
 		}
@@ -392,6 +641,17 @@ func validatePartIDs(seen map[string]Section, section Section, parts []Part) err
 		}
 		local[part.ID] = struct{}{}
 		pending = append(pending, part.ID)
+		for _, child := range part.Children {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	for _, part := range parts {
+		if err := visit(part); err != nil {
+			return err
+		}
 	}
 	for _, id := range pending {
 		seen[id] = section
@@ -408,14 +668,114 @@ func validSection(section Section) bool {
 	}
 }
 
+func (b *Builder) sourceBudget(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part, entry builderEntry) (SourceBudget, error) {
+	if b.budget == nil {
+		return SourceBudget{
+			MaxTokens:             unlimitedTokens,
+			RemainingPromptTokens: unlimitedTokens,
+			Required:              entry.required,
+		}, nil
+	}
+	used, err := b.countPrompt(ctx, renderer, parts)
+	if err != nil {
+		return SourceBudget{}, err
+	}
+	remaining := b.budget.promptLimit() - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	maxTokens := remaining
+	if entry.hasSourceCap && entry.sourceCap < maxTokens {
+		maxTokens = entry.sourceCap
+	}
+	return SourceBudget{
+		Tokenizer:             b.budget.Tokenizer,
+		MaxTokens:             maxTokens,
+		RemainingPromptTokens: remaining,
+		Required:              entry.required,
+		OverheadReserveTokens: b.budget.SourceOverheadReserveTokens,
+		Summarizer:            b.budget.Summarizer,
+	}, nil
+}
+
+func (b *Builder) partsFit(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part, section Section, next []Part) (bool, int, int, error) {
+	if b.budget == nil {
+		return true, 0, unlimitedTokens, nil
+	}
+	candidate := clonePartsMap(parts)
+	candidate[section] = cloneParts(next)
+	count, err := b.countPrompt(ctx, renderer, candidate)
+	if err != nil {
+		return false, 0, 0, err
+	}
+	limit := b.budget.promptLimit()
+	return count <= limit, count, limit, nil
+}
+
+func (b *Builder) partsFitAfterDroppingOptionalContext(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part, section Section, next []Part) (map[Section][]Part, bool, int, int, error) {
+	if b.budget == nil {
+		return parts, true, 0, unlimitedTokens, nil
+	}
+	candidate := clonePartsMap(parts)
+	candidate[SectionContext] = keepRequiredParts(candidate[SectionContext])
+	if section == SectionContext {
+		candidate[SectionContext] = keepRequiredParts(next)
+	} else {
+		candidate[section] = cloneParts(next)
+	}
+	count, err := b.countPrompt(ctx, renderer, candidate)
+	if err != nil {
+		return nil, false, 0, 0, err
+	}
+	limit := b.budget.promptLimit()
+	return candidate, count <= limit, count, limit, nil
+}
+
+func (b *Builder) countPrompt(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part) (int, error) {
+	prompt := renderPrompt(renderer, parts)
+	return b.budget.Tokenizer.CountTokens(ctx, prompt.CombinedPrompt())
+}
+
+func renderPrompt(renderer Renderer, parts map[Section][]Part) ai.Prompt {
+	return ai.Prompt{
+		System:  renderer.Render(SectionSystem, parts[SectionSystem]),
+		Context: renderer.Render(SectionContext, parts[SectionContext]),
+		Prompt:  renderer.Render(SectionUser, parts[SectionUser]),
+	}
+}
+
+func promptBudgetError(id string, used, available int) error {
+	return fmt.Errorf("%w: %q needs %d tokens, only %d available", ErrPromptBudget, id, used, available)
+}
+
+func markRequired(parts []Part) {
+	for i := range parts {
+		parts[i].Required = true
+		markRequired(parts[i].Children)
+	}
+}
+
+func partsTokenCount(parts []Part) int {
+	tokens := 0
+	for _, part := range parts {
+		tokens += part.tokenCount()
+	}
+	return tokens
+}
+
 func (b *Builder) emitEntry(ctx stdcontext.Context, name string, entry BuildTraceEntry) {
 	fields := map[string]any{
-		"id":       entry.ID,
-		"section":  string(entry.Section),
-		"kind":     string(entry.Kind),
-		"status":   entry.Status,
-		"required": entry.Required,
-		"parts":    len(entry.Parts),
+		"id":               entry.ID,
+		"section":          string(entry.Section),
+		"kind":             string(entry.Kind),
+		"status":           entry.Status,
+		"required":         entry.Required,
+		"parts":            len(entry.Parts),
+		"token_count":      entry.TokenCount,
+		"available_tokens": entry.AvailableTokens,
+	}
+	if entry.Reason != "" {
+		fields["reason"] = entry.Reason
 	}
 	if entry.Err != nil {
 		fields["error"] = entry.Err.Error()
@@ -458,13 +818,14 @@ func (e builderEntry) part() Part {
 
 func (e builderEntry) view() EntryView {
 	return EntryView{
-		ID:       e.id,
-		Section:  e.section,
-		Kind:     e.kind,
-		Required: e.required,
-		Tokens:   e.tokens,
-		Text:     e.text,
-		Meta:     cloneMeta(e.meta),
+		ID:        e.id,
+		Section:   e.section,
+		Kind:      e.kind,
+		Required:  e.required,
+		Tokens:    e.tokens,
+		SourceCap: e.sourceCap,
+		Text:      e.text,
+		Meta:      cloneMeta(e.meta),
 	}
 }
 
@@ -551,11 +912,63 @@ func cloneEntryViews(entries []EntryView) []EntryView {
 	return cloned
 }
 
+func clonePartsMap(parts map[Section][]Part) map[Section][]Part {
+	cloned := map[Section][]Part{}
+	for section, sectionParts := range parts {
+		cloned[section] = cloneParts(sectionParts)
+	}
+	return cloned
+}
+
+func clonePartIDMap(seen map[string]Section) map[string]Section {
+	cloned := make(map[string]Section, len(seen))
+	for id, section := range seen {
+		cloned[id] = section
+	}
+	return cloned
+}
+
+func rebuildPartIDs(parts map[Section][]Part) map[string]Section {
+	ids := map[string]Section{}
+	for section, sectionParts := range parts {
+		addPartIDs(ids, section, sectionParts)
+	}
+	return ids
+}
+
+func addPartIDs(ids map[string]Section, section Section, parts []Part) {
+	for _, part := range parts {
+		ids[part.ID] = section
+		addPartIDs(ids, section, part.Children)
+	}
+}
+
+func keepRequiredParts(parts []Part) []Part {
+	kept := make([]Part, 0, len(parts))
+	for _, part := range parts {
+		if part.Required {
+			kept = append(kept, part)
+		}
+	}
+	return kept
+}
+
+func markDroppedOptionalContextEntries(entries []BuildTraceEntry) []BuildTraceEntry {
+	for i := range entries {
+		if entries[i].Section == SectionContext && !entries[i].Required && entries[i].Status == "emitted" {
+			entries[i].Status = "dropped"
+			entries[i].Reason = "dropped_for_required_content"
+		}
+	}
+	return entries
+}
+
 func cloneParts(parts []Part) []Part {
 	cloned := make([]Part, len(parts))
 	for i, part := range parts {
 		cloned[i] = part
 		cloned[i].Meta = cloneMeta(part.Meta)
+		cloned[i].Children = cloneParts(part.Children)
 	}
 	return cloned
 }

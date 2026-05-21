@@ -259,12 +259,17 @@ To manage conversation history and build prompts from it, use the `context` pack
 store := mySessionStore // your implementation of SessionStore (e.g. in-memory, database, etc.)
 sessionID := 1
 prompt := aicontext.NewPromptBuilder().
+    Budget(aicontext.PromptBudget{
+        Tokenizer:            model.Tokenizer(),
+        ContextWindowTokens:  128000,
+        ReservedOutputTokens: 4096,
+    }).
     System(
         "base-system",
         "You are a helpful assistant that can call tools to get information.",
         aicontext.Required(),
     ).
-    Source(aicontext.SectionContext, "history", aicontext.History(store, sessionID, 10000, model.Tokenizer()), aicontext.Required()).
+    Source(aicontext.SectionContext, "history", aicontext.History(store, sessionID), aicontext.Required(), aicontext.SourceTokenCap(10000)).
     User(
         "request",
         "What is the weather in New York?",
@@ -445,29 +450,40 @@ You provide your own store that can:
 
 ```go
 prompt := aicontext.NewPromptBuilder().
+    Budget(aicontext.PromptBudget{
+        Tokenizer:            model.Tokenizer(),
+        ContextWindowTokens:  128000,
+        ReservedOutputTokens: 4096,
+    }).
     System("base-system", "Follow the system policy.", aicontext.Required()).
-    Source(aicontext.SectionContext, "history", aicontext.History(store, sessionID, 1000, model.Tokenizer()), aicontext.Required()).
-    Source(aicontext.SectionContext, "rag", ragSource, aicontext.Optional()).
+    Source(aicontext.SectionContext, "history", aicontext.History(store, sessionID), aicontext.Required(), aicontext.SourceTokenCap(1000)).
+    Source(aicontext.SectionContext, "rag", ragSource, aicontext.Optional(), aicontext.SourceTokenCap(2000)).
     User("request", "Summarize the project status.", aicontext.Required())
 ```
 
-Entries use stable IDs and are rendered in fixed section order (`system`, `context`, `user`) and append order inside each section. Each part has a `Tokens` field for future token accounting, but the builder does not count, trim, or enforce token budgets yet.
+Entries use stable IDs and are rendered in fixed section order (`system`, `context`, `user`) and append order inside each section. With `Budget(...)` configured, the builder counts the rendered prompt with the configured tokenizer, preserves required system/user content, drops optional overflow predictably, and returns `ErrPromptBudget` when required content cannot fit.
 
 Dynamic sources implement:
 
 ```go
 type Source interface {
-    BuildParts(ctx context.Context, view PromptView) ([]Part, error)
+    BuildParts(ctx context.Context, view PromptView, budget SourceBudget) ([]Part, error)
 }
 ```
 
-`PromptView` exposes the current conversation and a read-only view of the whole configured prompt plan, so sources can inspect planned entries by ID or section before emitting parts. Required source failures stop prompt building. Optional source failures are skipped.
+`PromptView` exposes the current conversation and a read-only view of the whole configured prompt plan, so sources can inspect planned entries by ID or section before emitting parts. `SourceBudget` provides the source's cap, remaining prompt budget, tokenizer, and optional summarizer. Required source failures stop prompt building. Optional source failures are skipped or dropped when they exceed the remaining budget.
 
-The default renderer is XML-like and can be replaced with a custom renderer. `LastTrace()` returns the most recent build trace, and `Debug(gai.DebugSink)` emits prompt-build events. Rendered part text is only included in debug events when the sink allows sensitive data.
+The default renderer is XML-like and can be replaced with a custom renderer. Grouped parts render as one outer part with child items, which lets sources like RAG budget individual documents without adding a full XML wrapper around every document. `LastTrace()` returns the most recent build trace, and `Debug(gai.DebugSink)` emits prompt-build events. Rendered part text is only included in debug events when the sink allows sensitive data.
 
 ### 🧭 History Sources
 
-`History(store, sessionID, tokenLimit, Tokenizer)` returns a prompt source that loads stored messages, renders them as a `history` part, and appends current loop messages as a `current-loop` part.
+`History(store, sessionID)` returns a prompt source that loads stored messages, renders them as `history-*` parts, and appends current loop messages as a `current-loop` part. Use `SourceTokenCap(...)` on the source entry to control how many tokens history may consume.
+
+### 🤖 Agent Definitions and Built-ins
+
+The `agent` package provides a small factory for reusable loop-backed agents. A definition combines a model, optional tools, a prompt-builder factory, and loop settings.
+
+Built-in agents live in their own packages. `agent/summary` embeds its default system prompt from `system.md` and exposes a summarizer that implements the context summarizer interface by running a summary agent through `loop`, collecting streamed text tokens, and returning the summary.
 
 ### 📄 Prompt Files
 

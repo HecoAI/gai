@@ -23,7 +23,7 @@ func TestPromptBuilderBuildsStructuredPrompt(t *testing.T) {
 	builder := aicontext.NewPromptBuilder().
 		System("base", "base system", aicontext.Required(), aicontext.Tokens(12)).
 		System("dynamic", "dynamic system", aicontext.Tokens(4)).
-		Source(aicontext.SectionContext, "memory", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
+		Source(aicontext.SectionContext, "memory", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
 			sourceCalled = true
 			if _, ok := view.Entry("base"); !ok {
 				t.Fatal("expected source view to expose full configured plan")
@@ -98,7 +98,7 @@ func TestPromptBuilderRejectsDuplicateEmittedPartIDs(t *testing.T) {
 
 	_, err := aicontext.NewPromptBuilder().
 		System("base", "system").
-		Source(aicontext.SectionContext, "dup-source", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
+		Source(aicontext.SectionContext, "dup-source", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
 			return []aicontext.Part{aicontext.NewPart("base", "duplicate")}, nil
 		}), aicontext.Required()).
 		BuildPrompt(stdcontext.Background(), emptyConversation{})
@@ -114,7 +114,7 @@ func TestPromptBuilderSourceFailurePolicy(t *testing.T) {
 	t.Parallel()
 
 	sourceErr := errors.New("source unavailable")
-	failingSource := aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
+	failingSource := aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
 		return nil, sourceErr
 	})
 
@@ -154,7 +154,7 @@ func TestPromptBuilderSourceCanInspectWholePlan(t *testing.T) {
 
 	prompt, err := aicontext.NewPromptBuilder().
 		System("base", "base system", aicontext.Required(), aicontext.Meta("role", "base")).
-		Source(aicontext.SectionContext, "conditional", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView) ([]aicontext.Part, error) {
+		Source(aicontext.SectionContext, "conditional", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
 			entry, ok := view.Entry("base")
 			if !ok || entry.Meta["role"] != "base" {
 				return nil, nil
@@ -220,6 +220,103 @@ func TestPromptBuilderEmitsDebugEvents(t *testing.T) {
 		if _, ok := event.Fields["emitted_parts"]; ok {
 			t.Fatalf("non-sensitive debug sink should not receive emitted part text: %+v", event)
 		}
+	}
+}
+
+func TestPromptBuilderDropsOptionalSourceOverBudget(t *testing.T) {
+	t.Parallel()
+
+	builder := aicontext.NewPromptBuilder().
+		Budget(aicontext.PromptBudget{
+			Tokenizer:           whitespaceTokenizer{},
+			ContextWindowTokens: 14,
+		}).
+		System("system", "system", aicontext.Required()).
+		Source(aicontext.SectionContext, "optional", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
+			return []aicontext.Part{aicontext.NewPart("optional-part", "optional content that does not fit")}, nil
+		}), aicontext.Optional()).
+		User("request", "question", aicontext.Required())
+
+	prompt, err := builder.BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+	if strings.Contains(prompt.Context, "optional content") {
+		t.Fatalf("expected optional context to be dropped: %q", prompt.Context)
+	}
+	trace := builder.LastTrace()
+	if got := trace.Entries[1].Status; got != "dropped" {
+		t.Fatalf("expected optional source to be dropped, got %q", got)
+	}
+}
+
+func TestPromptBuilderFailsRequiredOverBudget(t *testing.T) {
+	t.Parallel()
+
+	_, err := aicontext.NewPromptBuilder().
+		Budget(aicontext.PromptBudget{
+			Tokenizer:           whitespaceTokenizer{},
+			ContextWindowTokens: 5,
+		}).
+		System("system", "system prompt", aicontext.Required()).
+		User("request", "question", aicontext.Required()).
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if !errors.Is(err, aicontext.ErrPromptBudget) {
+		t.Fatalf("expected ErrPromptBudget, got %v", err)
+	}
+}
+
+func TestPromptBuilderPassesSourceCap(t *testing.T) {
+	t.Parallel()
+
+	sourceCalled := false
+	_, err := aicontext.NewPromptBuilder().
+		Budget(aicontext.PromptBudget{
+			Tokenizer:           whitespaceTokenizer{},
+			ContextWindowTokens: 50,
+		}).
+		Source(aicontext.SectionContext, "capped", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
+			sourceCalled = true
+			if budget.MaxTokens != 3 {
+				t.Fatalf("expected source cap of 3, got %d", budget.MaxTokens)
+			}
+			return []aicontext.Part{aicontext.NewPart("small", "small")}, nil
+		}), aicontext.SourceTokenCap(3)).
+		User("request", "question", aicontext.Required()).
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+	if !sourceCalled {
+		t.Fatal("expected capped source to be called")
+	}
+}
+
+func TestPromptBuilderDropsEarlierOptionalContextForLaterUserPrompt(t *testing.T) {
+	t.Parallel()
+
+	builder := aicontext.NewPromptBuilder().
+		Budget(aicontext.PromptBudget{
+			Tokenizer:           whitespaceTokenizer{},
+			ContextWindowTokens: 12,
+		}).
+		System("system", "system", aicontext.Required()).
+		Source(aicontext.SectionContext, "optional", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
+			return []aicontext.Part{aicontext.NewPart("optional-part", "optional")}, nil
+		}), aicontext.Optional()).
+		User("request", "question", aicontext.Required())
+	prompt, err := builder.BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+	if strings.Contains(prompt.Context, "optional") {
+		t.Fatalf("expected earlier optional context to be dropped for user prompt: %q", prompt.Context)
+	}
+	if !strings.Contains(prompt.Prompt, "question") {
+		t.Fatalf("expected user prompt to remain: %q", prompt.Prompt)
+	}
+	if got := builder.LastTrace().Entries[1].Status; got != "dropped" {
+		t.Fatalf("expected earlier optional trace to be dropped, got %q", got)
 	}
 }
 

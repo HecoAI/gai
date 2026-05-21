@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lace-ai/gai/ai"
 	aicontext "github.com/lace-ai/gai/context"
 	"github.com/lace-ai/gai/testutil/mocks"
 )
@@ -28,7 +29,7 @@ func TestHistorySourceBuildsPartsWithinTokenBudget(t *testing.T) {
 		},
 	}
 
-	parts, err := aicontext.History(store, 7, 17, tokenizer).BuildParts(stdcontext.Background(), testPromptView{conv: conv})
+	parts, err := aicontext.History(store, 7).BuildParts(stdcontext.Background(), testPromptView{conv: conv}, historyBudget(17, tokenizer))
 	if err != nil {
 		t.Fatalf("BuildParts failed: %v", err)
 	}
@@ -52,7 +53,7 @@ func TestHistorySourceBuildsPartsWithinTokenBudget(t *testing.T) {
 	assertHistoryStoreQueries(t, store.GetMessagesCalls, 7)
 }
 
-func TestHistorySourceDoesNotLoadStoredMessagesWhenCurrentLoopUsesBudget(t *testing.T) {
+func TestHistorySourceFailsWhenRequiredCurrentLoopExceedsBudget(t *testing.T) {
 	t.Parallel()
 
 	store := &mocks.MockSessionStore{
@@ -66,14 +67,10 @@ func TestHistorySourceDoesNotLoadStoredMessagesWhenCurrentLoopUsesBudget(t *test
 		},
 	}
 
-	parts, err := aicontext.History(store, 7, 6, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: conv})
-	if err != nil {
-		t.Fatalf("BuildParts failed: %v", err)
+	_, err := aicontext.History(store, 7).BuildParts(stdcontext.Background(), testPromptView{conv: conv}, historyBudget(6, whitespaceTokenizer{}))
+	if !errors.Is(err, aicontext.ErrPromptBudget) {
+		t.Fatalf("expected ErrPromptBudget, got %v", err)
 	}
-
-	rendered := joinPartText(parts)
-	assertHistoryContainsAll(t, rendered, "current message already fills budget")
-	assertHistoryContainsNone(t, rendered, "stored one")
 	if len(store.GetMessagesCalls) != 0 {
 		t.Fatalf("expected no store calls when current loop reaches the budget, got %+v", store.GetMessagesCalls)
 	}
@@ -88,7 +85,7 @@ func TestHistorySourceSkipsEmptyCurrentLoop(t *testing.T) {
 		},
 	}
 
-	parts, err := aicontext.History(store, 7, 100, rejectingEmptyTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
+	parts, err := aicontext.History(store, 7).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}}, historyBudget(100, rejectingEmptyTokenizer{}))
 	if err != nil {
 		t.Fatalf("BuildParts failed: %v", err)
 	}
@@ -107,7 +104,7 @@ func TestHistorySourcePropagatesStoreErrors(t *testing.T) {
 	wantErr := errors.New("read failed")
 	store := &mocks.MockSessionStore{Err: wantErr}
 
-	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
+	_, err := aicontext.History(store, 7).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}}, historyBudget(100, whitespaceTokenizer{}))
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected store error %v, got %v", wantErr, err)
 	}
@@ -123,7 +120,7 @@ func TestHistorySourcePropagatesTokenizerErrors(t *testing.T) {
 		},
 	}
 
-	_, err := aicontext.History(store, 7, 100, whitespaceTokenizer{err: wantErr}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
+	_, err := aicontext.History(store, 7).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}}, historyBudget(100, whitespaceTokenizer{err: wantErr}))
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected tokenizer error %v, got %v", wantErr, err)
 	}
@@ -132,7 +129,7 @@ func TestHistorySourcePropagatesTokenizerErrors(t *testing.T) {
 func TestHistorySourceRequiresStore(t *testing.T) {
 	t.Parallel()
 
-	_, err := aicontext.History(nil, 7, 100, whitespaceTokenizer{}).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
+	_, err := aicontext.History(nil, 7).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}}, historyBudget(100, whitespaceTokenizer{}))
 	if !errors.Is(err, aicontext.ErrSessionStoreNotFound) {
 		t.Fatalf("expected ErrSessionStoreNotFound, got %v", err)
 	}
@@ -143,7 +140,7 @@ func TestHistorySourceRequiresTokenizer(t *testing.T) {
 
 	store := &mocks.MockSessionStore{}
 
-	_, err := aicontext.History(store, 7, 100, nil).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}})
+	_, err := aicontext.History(store, 7).BuildParts(stdcontext.Background(), testPromptView{conv: fakeConversation{}}, historyBudget(100, nil))
 	if !errors.Is(err, aicontext.ErrTokenizerNotFound) {
 		t.Fatalf("expected ErrTokenizerNotFound, got %v", err)
 	}
@@ -179,6 +176,15 @@ func (t whitespaceTokenizer) CountTokens(ctx stdcontext.Context, text string) (i
 		return 0, err
 	}
 	return len(tokens), nil
+}
+
+func historyBudget(maxTokens int, tokenizer ai.Tokenizer) aicontext.SourceBudget {
+	return aicontext.SourceBudget{
+		Tokenizer:             tokenizer,
+		MaxTokens:             maxTokens,
+		RemainingPromptTokens: maxTokens,
+		Required:              true,
+	}
 }
 
 type fakeConversation struct {
