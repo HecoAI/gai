@@ -295,6 +295,29 @@ func TestPromptBuilderPassesSourceCap(t *testing.T) {
 	}
 }
 
+func TestPromptBuilderReusesTokenCountForSourceBudget(t *testing.T) {
+	t.Parallel()
+
+	tokenizer := &countingTokenizer{}
+	_, err := aicontext.NewPromptBuilder().
+		Budget(aicontext.PromptBudget{
+			Tokenizer:           tokenizer,
+			ContextWindowTokens: 100,
+		}).
+		System("system", "system", aicontext.Required()).
+		Source(aicontext.SectionContext, "source", aicontext.SourceFunc(func(ctx stdcontext.Context, view aicontext.PromptView, budget aicontext.SourceBudget) ([]aicontext.Part, error) {
+			if tokenizer.CountCalls != 1 {
+				t.Fatalf("source budget should reuse current prompt count, got %d token counts before source", tokenizer.CountCalls)
+			}
+			return []aicontext.Part{aicontext.NewPart("source-part", "source", aicontext.Required())}, nil
+		}), aicontext.Required()).
+		User("request", "question", aicontext.Required()).
+		BuildPrompt(stdcontext.Background(), emptyConversation{})
+	if err != nil {
+		t.Fatalf("BuildPrompt failed: %v", err)
+	}
+}
+
 func TestPromptBuilderDropsEarlierOptionalContextForLaterUserPrompt(t *testing.T) {
 	t.Parallel()
 
@@ -496,4 +519,21 @@ func (s fakeSummarizer) Summarize(ctx stdcontext.Context, req aicontext.SummaryR
 		return "", s.err
 	}
 	return s.summary, nil
+}
+
+type countingTokenizer struct {
+	CountCalls int
+}
+
+func (t *countingTokenizer) Tokenize(ctx stdcontext.Context, text string) ([]string, error) {
+	return strings.Fields(text), nil
+}
+
+func (t *countingTokenizer) CountTokens(ctx stdcontext.Context, text string) (int, error) {
+	t.CountCalls++
+	tokens, err := t.Tokenize(ctx, text)
+	if err != nil {
+		return 0, err
+	}
+	return len(tokens), nil
 }

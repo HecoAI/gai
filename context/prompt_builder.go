@@ -366,6 +366,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 		SectionUser:    {},
 	}
 	partIDs := map[string]Section{}
+	promptTokens := 0
 
 	b.emit(ctx, "prompt_build_started", map[string]any{"entries": len(b.entries)}, nil)
 	for _, entry := range orderedEntries(b.entries) {
@@ -389,7 +390,8 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 				return ai.Prompt{}, err
 			}
 			next := append(cloneParts(parts[entry.section]), part)
-			if ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next); !ok || err != nil {
+			ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next)
+			if !ok || err != nil {
 				if err != nil {
 					traceEntry.Err = err
 					traceEntry.Status = "error"
@@ -413,6 +415,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					if ok {
 						parts = cleanedParts
 						partIDs = rebuildPartIDs(parts)
+						promptTokens = retryCount
 						trace.Entries = markDroppedOptionalContextEntries(trace.Entries)
 						traceEntry.Reason = "dropped_optional_context"
 						traceEntry.TokenCount = retryCount
@@ -433,7 +436,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 				}
 				traceEntry.Status = "dropped"
 				traceEntry.Reason = "optional_over_budget"
-				if summarizedPart, ok, summaryCount, summaryAvailable, err := b.summarizeOptionalPart(ctx, renderer, parts, entry, part); err != nil {
+				if summarizedPart, ok, summaryCount, summaryPromptCount, summaryAvailable, err := b.summarizeOptionalPart(ctx, renderer, parts, entry, part, promptTokens); err != nil {
 					traceEntry.Err = err
 					traceEntry.Status = "error"
 					trace.Entries = append(trace.Entries, traceEntry)
@@ -452,6 +455,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					}
 					parts[entry.section] = append(cloneParts(parts[entry.section]), summarizedPart)
 					partIDs = nextSummaryPartIDs
+					promptTokens = summaryPromptCount
 					traceEntry.Status = "summarized"
 					traceEntry.Reason = "optional_summarized"
 					traceEntry.Parts = []Part{summarizedPart}
@@ -466,6 +470,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 			}
 			parts[entry.section] = next
 			partIDs = nextPartIDs
+			promptTokens = count
 			traceEntry.Status = "emitted"
 			traceEntry.Parts = []Part{part}
 			traceEntry.TokenCount = part.tokenCount()
@@ -488,15 +493,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 				continue
 			}
 
-			sourceBudget, err := b.sourceBudget(ctx, renderer, parts, entry)
-			if err != nil {
-				traceEntry.Err = err
-				traceEntry.Status = "error"
-				trace.Entries = append(trace.Entries, traceEntry)
-				b.trace = finalizeTrace(trace, parts)
-				b.emitEntry(ctx, "prompt_source_error", traceEntry)
-				return ai.Prompt{}, err
-			}
+			sourceBudget := b.sourceBudget(promptTokens, entry)
 			traceEntry.AvailableTokens = sourceBudget.MaxTokens
 			sourceParts, err := entry.source.BuildParts(ctx, view, sourceBudget)
 			if err != nil {
@@ -536,7 +533,8 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 				continue
 			}
 			next := append(cloneParts(parts[entry.section]), sourceParts...)
-			if ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next); !ok || err != nil {
+			ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next)
+			if !ok || err != nil {
 				if err != nil {
 					traceEntry.Err = err
 					traceEntry.Status = "error"
@@ -560,6 +558,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 					if ok {
 						parts = cleanedParts
 						partIDs = rebuildPartIDs(parts)
+						promptTokens = retryCount
 						trace.Entries = markDroppedOptionalContextEntries(trace.Entries)
 						traceEntry.Reason = "dropped_optional_context"
 						traceEntry.Status = "emitted"
@@ -587,6 +586,7 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 			}
 			parts[entry.section] = next
 			partIDs = nextPartIDs
+			promptTokens = count
 			traceEntry.Status = "emitted"
 			traceEntry.Parts = cloneParts(sourceParts)
 			traceEntry.TokenCount = partsTokenCount(sourceParts)
@@ -600,16 +600,11 @@ func (b *Builder) BuildPrompt(ctx stdcontext.Context, conv Conversation) (ai.Pro
 	b.trace = trace
 	prompt := renderPrompt(renderer, parts)
 	if b.budget != nil {
-		count, err := b.budget.Tokenizer.CountTokens(ctx, prompt.CombinedPrompt())
-		if err != nil {
-			b.emit(ctx, "prompt_build_failed", map[string]any{"error": err.Error()}, err)
-			return ai.Prompt{}, err
-		}
-		if count > b.budget.promptLimit() {
-			err := promptBudgetError("prompt", count, b.budget.promptLimit())
+		if promptTokens > b.budget.promptLimit() {
+			err := promptBudgetError("prompt", promptTokens, b.budget.promptLimit())
 			b.emit(ctx, "prompt_build_failed", map[string]any{
 				"error":            err.Error(),
-				"prompt_tokens":    count,
+				"prompt_tokens":    promptTokens,
 				"available_tokens": b.budget.promptLimit(),
 			}, err)
 			return ai.Prompt{}, err
@@ -710,19 +705,15 @@ func validSection(section Section) bool {
 	}
 }
 
-func (b *Builder) sourceBudget(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part, entry builderEntry) (SourceBudget, error) {
+func (b *Builder) sourceBudget(usedTokens int, entry builderEntry) SourceBudget {
 	if b.budget == nil {
 		return SourceBudget{
 			MaxTokens:             unlimitedTokens,
 			RemainingPromptTokens: unlimitedTokens,
 			Required:              entry.required,
-		}, nil
+		}
 	}
-	used, err := b.countPrompt(ctx, renderer, parts)
-	if err != nil {
-		return SourceBudget{}, err
-	}
-	remaining := b.budget.promptLimit() - used
+	remaining := b.budget.promptLimit() - usedTokens
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -737,7 +728,7 @@ func (b *Builder) sourceBudget(ctx stdcontext.Context, renderer Renderer, parts 
 		Required:              entry.required,
 		OverheadReserveTokens: b.budget.SourceOverheadReserveTokens,
 		Summarizer:            b.budget.Summarizer,
-	}, nil
+	}
 }
 
 func (b *Builder) partsFit(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part, section Section, next []Part) (bool, int, int, error) {
@@ -773,17 +764,13 @@ func (b *Builder) partsFitAfterDroppingOptionalContext(ctx stdcontext.Context, r
 	return candidate, count <= limit, count, limit, nil
 }
 
-func (b *Builder) summarizeOptionalPart(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part, entry builderEntry, part Part) (Part, bool, int, int, error) {
+func (b *Builder) summarizeOptionalPart(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part, entry builderEntry, part Part, usedTokens int) (Part, bool, int, int, int, error) {
 	if b.budget == nil || b.budget.Summarizer == nil || b.budget.Tokenizer == nil || entry.required {
-		return Part{}, false, 0, 0, nil
+		return Part{}, false, 0, 0, 0, nil
 	}
-	used, err := b.countPrompt(ctx, renderer, parts)
-	if err != nil {
-		return Part{}, false, 0, 0, err
-	}
-	remaining := b.budget.promptLimit() - used
+	remaining := b.budget.promptLimit() - usedTokens
 	if remaining <= 0 {
-		return Part{}, false, 0, b.budget.promptLimit(), nil
+		return Part{}, false, 0, 0, b.budget.promptLimit(), nil
 	}
 	summary, err := b.budget.Summarizer.Summarize(ctx, SummaryRequest{
 		ID:        entry.id,
@@ -793,11 +780,11 @@ func (b *Builder) summarizeOptionalPart(ctx stdcontext.Context, renderer Rendere
 		Meta:      cloneMeta(part.Meta),
 	})
 	if err != nil {
-		return Part{}, false, 0, remaining, nil
+		return Part{}, false, 0, 0, remaining, nil
 	}
 	summaryTokens, err := b.budget.Tokenizer.CountTokens(ctx, summary)
 	if err != nil {
-		return Part{}, false, 0, remaining, err
+		return Part{}, false, 0, 0, remaining, err
 	}
 	summarized := Part{
 		ID:       part.ID,
@@ -807,10 +794,11 @@ func (b *Builder) summarizeOptionalPart(ctx stdcontext.Context, renderer Rendere
 		Meta:     cloneMeta(part.Meta),
 	}
 	next := append(cloneParts(parts[entry.section]), summarized)
-	if ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next); !ok || err != nil {
-		return Part{}, false, count, available, err
+	ok, count, available, err := b.partsFit(ctx, renderer, parts, entry.section, next)
+	if !ok || err != nil {
+		return Part{}, false, 0, count, available, err
 	}
-	return summarized, true, summaryTokens, remaining, nil
+	return summarized, true, summaryTokens, count, remaining, nil
 }
 
 func (b *Builder) countPrompt(ctx stdcontext.Context, renderer Renderer, parts map[Section][]Part) (int, error) {
